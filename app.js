@@ -30,3 +30,7 @@ const PORT = 5000;
 server.listen(PORT, () => {
   console.log(`✅ Server is running on http://localhost:${PORT}`);
 });
+app.post("/api/generate-graph", (req, res) => {
+  console.log("✅ 직접 등록된 generate-graph 라우트 작동");
+  res.json({ image: "test" });
+});

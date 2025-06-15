@@ -2,6 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const { spawn } = require("child_process");
 const path = require("path");
+const { Console } = require("console");
 
 const router = express.Router();  // ✅ 추가
 // ✅ storage를 먼저 선언한 후 multer 사용!
@@ -70,6 +71,46 @@ router.post("/process", (req, res) => {
             }
         } else {
             res.status(500).json({ error: "Python 스크립트 실행 실패" });
+        }
+    });
+});
+console.log("🧪 /generate-graph 라우트 선언 직전 도달");
+router.post("/generate-graph", (req, res) => {
+    console.log("📢 /generate-graph API 호출됨!");
+
+    const { xColumn, yColumn, data } = req.body;
+
+    console.log("📂 요청 데이터:", { xColumn, yColumn });  // ✅ 데이터 확인 로그 추가
+
+    if (!xColumn || !yColumn || !data) {
+        return res.status(400).json({ error: "필요한 데이터가 부족합니다." });
+    }
+
+    const pythonProcess = spawn("C:\\Users\\user\\anaconda3\\envs\\ngnl\\python.exe", [
+        "scripts/generate_graph.py",
+        JSON.stringify(data),
+        xColumn,
+        yColumn,
+    ]);
+
+    let imageBuffer = [];
+
+    pythonProcess.stdout.on("data", (data) => {
+        imageBuffer.push(data);
+    });
+
+    pythonProcess.stderr.on("data", (data) => {  // ✅ 에러 로그 확인
+        console.error(`❌ Python 오류: ${data}`);
+    });
+
+    pythonProcess.on("close", (code) => {
+        console.log(`⚡ Python 프로세스 종료 (코드: ${code})`);
+        if (code === 0) {
+            
+            const imageBase64 = Buffer.concat(imageBuffer).toString('base64');
+            res.json({ image: imageBase64 });
+        } else {
+            res.status(500).json({ error: "그래프 생성 실패" });
         }
     });
 });
