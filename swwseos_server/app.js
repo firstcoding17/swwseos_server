@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+import express from 'express';
+import tmpUpload from './routes/tmp-upload.js';
 
 
 // 모듈 가져오기
@@ -22,7 +24,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'X-API-Key']
 }));
 
-app.use(express.json({limit: '20mb'})); // JSON 요청 처리
+app.use(express.json({limit: '25mb'})); // JSON 요청 처리
 
 function apiKeyGuard(req, res, next) {
   const allowed = (process.env.ALLOWED_API_KEYS || '')
@@ -43,6 +45,8 @@ app.get('/healthz', (req, res) => res.send('ok'));
 
 // ✅ REST API 라우트 연결
 app.use('/api', apiKeyGuard, pythonRoutes);
+
+app.use('/tmp-upload', tmpUpload);
 
 
 
