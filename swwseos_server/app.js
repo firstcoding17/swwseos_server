@@ -1,62 +1,60 @@
-require('dotenv').config();    
+try { require('dotenv').config(); } catch (_) {}
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
-import express from 'express';
-import tmpUpload from './routes/tmp-upload.js';
 
-
-// 모듈 가져오기
-const pythonRoutes = require('./routes/python'); // REST API 라우트
-const statRouter = require('./routes/stat'); // 이름 통일
-
-
-const { initializeWebSocket } = require('./services/socket'); // WebSocket 초기화
+const pythonRoutes = require('./routes/python');
+const statRoutes = require('./routes/stat');
+const tmpUploadRoutes = require('./routes/tmp-upload');
+const vizRoutes = require('./routes/viz');
+const aggregateRoutes = require('./routes/aggregate');
+const { initializeWebSocket } = require('./services/socet');
 
 const app = express();
 const server = http.createServer(app);
 
-
-// ✅ CORS 설정
 app.use(cors({
-  origin: '*', // Vue.js가 실행되는 모든 도메인 허용
+  origin: '*',
   methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'X-API-Key']
+  allowedHeaders: ['Content-Type', 'X-API-Key'],
 }));
 
-app.use(express.json({limit: '25mb'})); // JSON 요청 처리
+app.use(express.json({ limit: '25mb' }));
 
 function apiKeyGuard(req, res, next) {
   const allowed = (process.env.ALLOWED_API_KEYS || '')
-    .split(',').map(s => s.trim()).filter(Boolean);
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   const key = req.header('X-API-Key') || req.query.api_key;
+
   if (!key || !allowed.includes(key)) {
-    return res.status(401).json({ ok: false, error: 'Invalid or missing API key' });
+    return res.status(401).json({
+      ok: false,
+      code: 'AUTH_INVALID_API_KEY',
+      message: 'Invalid or missing API key',
+      error: 'Invalid or missing API key',
+    });
   }
-  next();
+  return next();
 }
 
 app.get('/auth/verify', apiKeyGuard, (req, res) => {
   res.json({ ok: true });
 });
 
-// (선택) 헬스체크
-app.get('/healthz', (req, res) => res.send('ok'));
+app.get('/healthz', (req, res) => res.json({ ok: true }));
 
-// ✅ REST API 라우트 연결
 app.use('/api', apiKeyGuard, pythonRoutes);
+app.use('/tmp-upload', apiKeyGuard, tmpUploadRoutes);
+app.use('/viz', apiKeyGuard, vizRoutes);
+app.use('/viz/aggregate', apiKeyGuard, aggregateRoutes);
+app.use('/stat', apiKeyGuard, statRoutes);
 
-app.use('/tmp-upload', tmpUpload);
-
-
-
-app.use('/stat', apiKeyGuard, statRouter);
-
-// ✅ WebSocket 초기화
 initializeWebSocket(server);
-
 
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
-  console.log(`✅ Server is running on http://localhost:${PORT}`);
+  console.log(`Server is running on http://localhost:${PORT}`);
 });
+

@@ -1,26 +1,26 @@
-const { Server } = require('socket.io');
+﻿const { Server } = require('socket.io');
 
 exports.initializeWebSocket = (server) => {
   const io = new Server(server, {
     cors: {
-      origin: '*', // 모든 도메인에서 WebSocket 허용 (보안 강화 필요 시 특정 도메인만 허용)
+      origin: '*', // Allow WebSocket from all origins
       methods: ['GET', 'POST']
     }
   });
 
   io.on('connection', (socket) => {
-    console.log('🔗 WebSocket Client connected');
+    console.log('WebSocket client connected');
 
     socket.on('message', (data) => {
-      console.log('📨 Message from client:', data);
+      console.log('Message from client:', data);
       socket.emit('server-message', { reply: 'Message received' });
     });
 
     socket.on('disconnect', () => {
-      console.log('❌ WebSocket Client disconnected');
+      console.log('WebSocket client disconnected');
     });
   });
 
-  console.log('✅ WebSocket Server started');
+  console.log('WebSocket server started');
   return io;
 };

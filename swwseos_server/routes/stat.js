@@ -1,154 +1,176 @@
 const express = require('express');
-const router = express.Router();
-const { PythonShell } = require('python-shell');
+const { spawn } = require('child_process');
 const path = require('path');
-const fs = require('fs');
 
-// uploads 폴더의 최신 파일 찾기 (filename 미전달 시 대비)
-function getLatestUpload() {
-  const dir = path.join(__dirname, '..', 'uploads');
-  const files = fs.readdirSync(dir).filter(f => !f.startsWith('.'));
-  if (!files.length) throw new Error('업로드된 파일이 없습니다.');
-  const full = files
-    .map(f => ({ f, t: fs.statSync(path.join(dir, f)).mtimeMs }))
-    .sort((a,b) => b.t - a.t)[0].f;
-  return path.join(dir, full);
-}
+const router = express.Router();
+const SCRIPTS_DIR = path.resolve(__dirname, '../scripts');
+const PYTHON_BIN = process.env.PYTHON_BIN || 'python';
 
-function runPy(scriptName, args) {
-  return new Promise((resolve, reject) => {
-    const options = {
-      mode: 'json',
-      pythonOptions: ['-u'],
-      scriptPath: path.join(__dirname, '..', 'scripts'),
-      args,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-    };
-    PythonShell.run(`${scriptName}.py`, options, (err, results) => {
-      if (err) return reject(err);
-      if (!results || !results.length) return reject(new Error('No result from Python'));
-      resolve(results[0]);
+function runStat(payload, res) {
+  try {
+    const py = spawn(PYTHON_BIN, ['stat_run.py'], {
+      cwd: SCRIPTS_DIR,
+      env: { ...process.env, PYTHONUTF8: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
-  });
+
+    py.stdin.write(JSON.stringify(payload || {}));
+    py.stdin.end();
+
+    let out = '';
+    let err = '';
+    py.stdout.on('data', (d) => (out += d.toString()));
+    py.stderr.on('data', (d) => (err += d.toString()));
+
+    py.on('close', (code) => {
+      if (code !== 0) {
+        console.error('[stat_run.py] exit', code, '\n', err);
+        return res.status(500).json({
+          ok: false,
+          code: 'STAT_RUN_FAILED',
+          message: 'stat run failed',
+          details: err,
+          error: 'stat run failed',
+        });
+      }
+      try {
+        const obj = JSON.parse(out);
+        if (obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, 'ok')) {
+          return res.json(obj);
+        }
+        return res.json({ ok: true, ...(obj || {}) });
+      } catch {
+        console.error('[stat_run.py] invalid JSON', out);
+        return res.status(500).json({
+          ok: false,
+          code: 'STAT_RUN_INVALID_JSON',
+          message: 'invalid json from python',
+          details: out,
+          error: 'invalid json from python',
+        });
+      }
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({
+      ok: false,
+      code: 'STAT_RUN_EXCEPTION',
+      message: 'stat run exception',
+      details: String(e),
+      error: 'stat run exception',
+    });
+  }
 }
 
-// 기초 통계량: /stat/basic  { column, filename? }
-router.post('/basic', async (req, res) => {
+router.get('/capabilities', async (_req, res) => {
   try {
-    const { column, filename } = req.body || {};
-    if (!column) return res.status(400).json({ error: 'column이 필요합니다.' });
+    const py = spawn(
+      PYTHON_BIN,
+      [
+        '-c',
+        "import json, importlib.util as u; print(json.dumps({'ok': True, 'data': {'scipy': bool(u.find_spec('scipy')), 'statsmodels': bool(u.find_spec('statsmodels'))}}, ensure_ascii=False))",
+      ],
+      { env: { ...process.env, PYTHONUTF8: '1' }, cwd: SCRIPTS_DIR, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
 
-    const filePath = filename
-      ? path.join(__dirname, '..', 'uploads', filename)
-      : getLatestUpload();
+    let out = '';
+    let err = '';
+    py.stdout.on('data', (d) => (out += d.toString()));
+    py.stderr.on('data', (d) => (err += d.toString()));
 
-    const data = await runPy('basic_stat', [filePath, column]);
-    res.json(data);
+    py.on('close', (code) => {
+      if (code !== 0) {
+        return res.status(500).json({
+          ok: false,
+          code: 'STAT_CAPABILITY_CHECK_FAILED',
+          message: 'failed to check stat capabilities',
+          details: err,
+          error: 'failed to check stat capabilities',
+        });
+      }
+      try {
+        const obj = JSON.parse(out);
+        return res.json(obj);
+      } catch (e) {
+        return res.status(500).json({
+          ok: false,
+          code: 'STAT_CAPABILITY_INVALID_JSON',
+          message: 'invalid capability response from python',
+          details: String(e),
+          error: 'invalid capability response from python',
+        });
+      }
+    });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: String(e) });
+    return res.status(500).json({
+      ok: false,
+      code: 'STAT_CAPABILITY_EXCEPTION',
+      message: 'stat capability exception',
+      details: String(e),
+      error: 'stat capability exception',
+    });
   }
 });
 
-// 분포 시각화(히스토그램): /stat/distribution  { column, filename? }
+function normalizeLegacyPayload(op, body) {
+  const payload = body && typeof body === 'object' ? { ...body } : {};
+  if (op === 'describe') return { ...payload, op: 'describe' };
+  if (op === 'corr') return { ...payload, op: 'corr' };
+  if (op === 'ttest') {
+    return {
+      ...payload,
+      op: 'ttest',
+      args: {
+        value: payload.value ?? payload.valueCol ?? payload.args?.value,
+        group: payload.group ?? payload.groupCol ?? payload.args?.group,
+      },
+    };
+  }
+  if (op === 'chisq') {
+    return {
+      ...payload,
+      op: 'chisq',
+      args: {
+        a: payload.a ?? payload.colA ?? payload.args?.a,
+        b: payload.b ?? payload.colB ?? payload.args?.b,
+      },
+    };
+  }
+  if (op === 'ols') {
+    return {
+      ...payload,
+      op: 'ols',
+      args: {
+        y: payload.y ?? payload.target ?? payload.args?.y,
+        x: payload.x ?? payload.features ?? payload.args?.x,
+      },
+      options: {
+        ...(payload.options || {}),
+        ...(payload.addIntercept !== undefined ? { addIntercept: payload.addIntercept } : {}),
+        ...(payload.dummy !== undefined ? { dummy: payload.dummy } : {}),
+        ...(payload.dropFirst !== undefined ? { dropFirst: payload.dropFirst } : {}),
+        ...(payload.robust !== undefined ? { robust: payload.robust } : {}),
+      },
+    };
+  }
+  return payload;
+}
+
+router.post('/run', async (req, res) => runStat(req.body || {}, res));
+router.post('/basic', async (req, res) => runStat(normalizeLegacyPayload('describe', req.body), res));
+router.post('/summary', async (req, res) => runStat(normalizeLegacyPayload('describe', req.body), res));
+router.post('/correlation', async (req, res) => runStat(normalizeLegacyPayload('corr', req.body), res));
+router.post('/ttest', async (req, res) => runStat(normalizeLegacyPayload('ttest', req.body), res));
+router.post('/chi2', async (req, res) => runStat(normalizeLegacyPayload('chisq', req.body), res));
+router.post('/linreg', async (req, res) => runStat(normalizeLegacyPayload('ols', req.body), res));
 router.post('/distribution', async (req, res) => {
-  try {
-    const { column, filename } = req.body || {};
-    if (!column) return res.status(400).json({ error: 'column이 필요합니다.' });
-
-    const filePath = filename
-      ? path.join(__dirname, '..', 'uploads', filename)
-      : getLatestUpload();
-
-    const data = await runPy('distribution', [filePath, column]);
-    // 결과: { image: "파일명.png" } -> 정적 제공
-    res.json(data);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: String(e) });
-  }
+  return res.status(410).json({
+    ok: false,
+    code: 'STAT_DISTRIBUTION_DEPRECATED',
+    message: 'distribution endpoint is deprecated; use /stat/run',
+    details: { op: 'describe|corr' },
+    error: 'distribution endpoint is deprecated',
+  });
 });
-
-// 상관분석: /stat/correlation  { column?, filename? }  // column은 프론트 호환용
-router.post('/correlation', async (req, res) => {
-  try {
-    const { column, filename } = req.body || {};
-    const filePath = filename
-      ? path.join(__dirname, '..', 'uploads', filename)
-      : getLatestUpload();
-
-    const data = await runPy('correlation', [filePath, column || 'ALL']);
-    res.json(data);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-// t-검정: /stat/ttest
-// body: { valueCol, groupCol, groupA, groupB, filename?, equal_var? }
-router.post('/ttest', async (req, res) => {
-    try {
-      const { valueCol, groupCol, groupA, groupB, filename, equal_var } = req.body || {};
-      if (!valueCol || !groupCol || groupA === undefined || groupB === undefined) {
-        return res.status(400).json({ error: 'valueCol, groupCol, groupA, groupB 필요' });
-      }
-      const filePath = filename
-        ? path.join(__dirname, '..', 'uploads', filename)
-        : getLatestUpload();
-  
-      const args = [filePath, valueCol, groupCol, String(groupA), String(groupB), String(!!equal_var)];
-      const data = await runPy('ttest', args);
-      res.json(data);
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: String(e) });
-    }
-  });
-  
-  // 카이제곱: /stat/chi2
-  // body: { colA, colB, filename? }
-  router.post('/chi2', async (req, res) => {
-    try {
-      const { colA, colB, filename } = req.body || {};
-      if (!colA || !colB) return res.status(400).json({ error: 'colA, colB 필요' });
-  
-      const filePath = filename
-        ? path.join(__dirname, '..', 'uploads', filename)
-        : getLatestUpload();
-  
-      const data = await runPy('chi2', [filePath, colA, colB]);
-      res.json(data);
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: String(e) });
-    }
-  });
-  
-  // 선형회귀: /stat/linreg
-  // body: { target, features: string[], filename? }
-  router.post('/linreg', async (req, res) => {
-    try {
-      const { target, features, filename } = req.body || {};
-      if (!target || !Array.isArray(features) || features.length === 0) {
-        return res.status(400).json({ error: 'target, features[] 필요' });
-      }
-  
-      const filePath = filename
-        ? path.join(__dirname, '..', 'uploads', filename)
-        : getLatestUpload();
-  
-      const featCSV = features.join(',');
-      const data = await runPy('linreg', [filePath, target, featCSV]);
-      res.json(data);
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: String(e) });
-    }
-  });
-
-
-// outputs 폴더 정적 제공 (히스토그램 보기용)
-router.use('/images', express.static(path.join(__dirname, '..', 'outputs')));
 
 module.exports = router;
