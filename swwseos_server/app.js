@@ -8,6 +8,8 @@ const statRoutes = require('./routes/stat');
 const tmpUploadRoutes = require('./routes/tmp-upload');
 const vizRoutes = require('./routes/viz');
 const aggregateRoutes = require('./routes/aggregate');
+const mlRoutes = require('./routes/ml');
+const mcpRoutes = require('./routes/mcp');
 const { initializeWebSocket } = require('./services/socet');
 
 const app = express();
@@ -43,13 +45,23 @@ app.get('/auth/verify', apiKeyGuard, (req, res) => {
   res.json({ ok: true });
 });
 
+// Public health endpoint for runtime checks (no API key required)
 app.get('/healthz', (req, res) => res.json({ ok: true }));
 
+// Guarded API surface
+// - /api: legacy compatibility endpoints (upload/process/generate-graph/run-python)
+// - /tmp-upload: optional temporary upload signing/deletion
+// - /viz, /viz/aggregate: new visualization preparation/aggregation
+// - /stat: standardized statistics contract (/stat/run)
+// - /ml: model training playground (ML + neural baseline)
+// - /mcp: MCP-compatible discovery/call bridge
 app.use('/api', apiKeyGuard, pythonRoutes);
 app.use('/tmp-upload', apiKeyGuard, tmpUploadRoutes);
 app.use('/viz', apiKeyGuard, vizRoutes);
 app.use('/viz/aggregate', apiKeyGuard, aggregateRoutes);
 app.use('/stat', apiKeyGuard, statRoutes);
+app.use('/ml', apiKeyGuard, mlRoutes);
+app.use('/mcp', apiKeyGuard, mcpRoutes);
 
 initializeWebSocket(server);
 

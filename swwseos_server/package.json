@@ -4,7 +4,13 @@
   "main": "index.js",
   "scripts": {
     "start": "node app.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:stat": "python -m unittest discover -s tests -p \"test_stat_run_*.py\" -v",
+    "test:ml": "python -m unittest discover -s tests -p \"test_ml_run_*.py\" -v",
+    "test:tmp-upload": "node tests/test_tmp_upload_contract.js",
+    "test:mcp": "node tests/test_mcp_contract.js",
+    "test:mcp-manual": "node tests/test_mcp_manual_flow.js",
+    "test:claude": "node tests/test_claude_client_contract.js"
   },
   "keywords": [],
   "author": "",

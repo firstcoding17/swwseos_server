@@ -23,7 +23,7 @@ def groupby_agg(df, x, y, hue, agg):
             g = df.groupby(keys, dropna=False).size().reset_index(name="value")
             ycol = "value"
     if hue:
-        # 여러 시리즈로 반환
+        # Return as multiple series when hue is present.
         series = {}
         for k, sub in g.groupby(hue, dropna=False):
             series[str(k)] = {
@@ -59,14 +59,14 @@ def quantiles_by_group(df, y, hue):
 def heatmap_2d_bin(df, x, y, bins=30):
     xv = pd.to_numeric(df[x], errors='coerce').dropna()
     yv = pd.to_numeric(df[y], errors='coerce').dropna()
-    # 공통 인덱스 맞추기보다 간단히 dropna 함께
+    # Keep paired frame and drop NaN for simplicity.
     d = pd.DataFrame({x:xv, y:yv}).dropna()
     H, xedges, yedges = np.histogram2d(d[x].to_numpy(), d[y].to_numpy(), bins=int(bins))
     return {"result":{"xBins": xedges.tolist(), "yBins": yedges.tolist(), "zCounts": H.astype(int).tolist()},
             "meta":{"op":"2dbin","rowsUsed":int(d.shape[0])}}
 
 def resample_line(df, x, y, rule, agg):
-    # x: datetime 파싱
+    # Parse x as datetime.
     s = pd.to_datetime(df[x], errors='coerce')
     df2 = df.copy()
     df2['_dt'] = s
@@ -108,16 +108,16 @@ def main():
         return json_out(quantiles_by_group(df, y, hue))
 
     if t == 'heatmap':
-        # 숫자형 x/y 가정 (상관 히트맵이 아니라 2D bin)
+        # Assume numeric x/y (2D binned heatmap, not corr matrix).
         bins = int(opts.get("bins", 30))
         return json_out(heatmap_2d_bin(df, x, y, bins))
 
     if t == 'line' and opts.get('resample'):
-        rule = opts.get('resample')  # 'D','W','M' 등
+        rule = opts.get('resample')  # e.g. 'D', 'W', 'M'
         agg = (opts.get('agg') or 'sum')
         return json_out(resample_line(df, x, y, rule, agg))
 
-    # 기본: 미지원 → 프런트 집계로 폴백
+    # Default: unsupported type -> frontend fallback.
     return json_out({"result": {}, "meta": {"op": "noop"}})
 
 if __name__ == "__main__":

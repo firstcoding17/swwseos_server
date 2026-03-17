@@ -35,7 +35,8 @@ router.post('/', async (req, res) => {
       }
       try {
         const obj = JSON.parse(out);
-        return res.json({ ok: true, ...(obj || {}) });
+        if (obj && obj.ok === false) return res.status(400).json(obj);
+        return res.json({ ok: true, data: obj || {} });
       } catch {
         console.error('[aggregate.py] invalid JSON', out);
         return res.status(500).json({

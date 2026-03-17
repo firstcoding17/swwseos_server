@@ -10,13 +10,13 @@ router.post('/sign', async (req, res) => {
   const key = `tmp/${Date.now()}-${safeName}`;
   const ttlSec = 3600;
 
-  res.json({ ok: true, data: { url, key, ttlSec }, url, key, ttlSec });
+  res.json({ ok: true, data: { url, key, ttlSec } });
 });
 
 // Delete temp object
 router.post('/delete', async (req, res) => {
   const { key } = req.body || {};
-  res.json({ ok: true, data: { key }, key });
+  res.json({ ok: true, data: { key } });
 });
 
 module.exports = router;

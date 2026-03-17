@@ -28,8 +28,26 @@ def main():
         return
 
     t = (spec.get("type") or "").lower()
-    x = spec.get("x"); y = spec.get("y"); hue = spec.get("hue")
+    x = spec.get("x"); y = spec.get("y"); hue = spec.get("hue"); size = spec.get("size")
     pal = palette_seq(opts.get("palette", "default"))
+
+    def agg_by_x(frame: pd.DataFrame, x_col: str, y_col: str, agg_mode: str):
+        if not x_col or x_col not in frame.columns:
+            return pd.DataFrame(columns=["label", "value"])
+        g = frame[[x_col]].copy()
+        g["_y"] = pd.to_numeric(frame[y_col], errors="coerce") if (y_col and y_col in frame.columns) else np.nan
+        if (not y_col) or (agg_mode == "count"):
+            out = g.groupby(x_col, dropna=False).size().reset_index(name="value")
+        elif agg_mode == "sum":
+            out = g.groupby(x_col, dropna=False)["_y"].sum().reset_index(name="value")
+        elif agg_mode == "mean":
+            out = g.groupby(x_col, dropna=False)["_y"].mean().reset_index(name="value")
+        else:
+            out = g.groupby(x_col, dropna=False).size().reset_index(name="value")
+        out = out.rename(columns={x_col: "label"})
+        out["label"] = out["label"].astype(str)
+        out["value"] = pd.to_numeric(out["value"], errors="coerce").fillna(0.0)
+        return out
 
     def label_layout(fig):
         title = opts.get("title") or ""
@@ -57,8 +75,15 @@ def main():
                 fig = px.bar(g, x=x, y="value", color=hue, barmode="group", color_discrete_sequence=pal)
     elif t == "line":
         fig = px.line(df.sort_values(by=x), x=x, y=y, color=hue, markers=True, color_discrete_sequence=pal)
+    elif t == "area":
+        fig = px.area(df.sort_values(by=x), x=x, y=y, color=hue, color_discrete_sequence=pal)
+        if opts.get("stackedArea") is False:
+            fig.update_traces(stackgroup=None, fill="tozeroy")
     elif t == "scatter":
         fig = px.scatter(df, x=x, y=y, color=hue, color_discrete_sequence=pal)
+    elif t == "bubble":
+        size_col = size if (size and size in df.columns) else None
+        fig = px.scatter(df, x=x, y=y, color=hue, size=size_col, color_discrete_sequence=pal)
     elif t == "histogram":
         bins = int(opts.get("bins", 30))
         fig = px.histogram(df, x=x, nbins=bins, color=hue, color_discrete_sequence=pal)
@@ -68,6 +93,26 @@ def main():
         fig = px.violin(df, x=hue, y=y, color=hue, box=True, points="outliers", color_discrete_sequence=pal)
     elif t == "treemap":
         fig = px.treemap(df, path=[hue, x] if hue else [x], values=y if y else None)
+    elif t == "pie":
+        agg = (opts.get("agg") or "count")
+        g = agg_by_x(df, x, y, agg)
+        fig = px.pie(g, names="label", values="value", color="label", color_discrete_sequence=pal)
+    elif t == "donut":
+        agg = (opts.get("agg") or "count")
+        g = agg_by_x(df, x, y, agg)
+        fig = px.pie(g, names="label", values="value", color="label", hole=0.45, color_discrete_sequence=pal)
+    elif t == "funnel":
+        agg = (opts.get("agg") or "count")
+        g = agg_by_x(df, x, y, agg)
+        fig = px.funnel(g, y="label", x="value")
+    elif t == "waterfall":
+        agg = (opts.get("agg") or "count")
+        g = agg_by_x(df, x, y, agg)
+        fig = go.Figure(go.Waterfall(
+            x=g["label"].tolist(),
+            y=g["value"].astype(float).tolist(),
+            measure=["relative"] * len(g),
+        ))
     elif t == "heatmap":
         if hue and hue in df.columns:
             g = df.groupby([x, y], dropna=False)[hue].sum().reset_index()

@@ -66,9 +66,10 @@ router.post('/run-python', (req, res) => {
     }
     const text = out.trim();
     try {
-      return res.json({ ok: true, output: JSON.parse(text || '{}') });
+      const output = JSON.parse(text || '{}');
+      return res.json({ ok: true, data: { output }, output });
     } catch {
-      return res.json({ ok: true, output: text });
+      return res.json({ ok: true, data: { output: text }, output: text });
     }
   });
 
@@ -87,6 +88,10 @@ router.post('/upload', uploadData.single('file'), (req, res) => {
 
   return res.json({
     ok: true,
+    data: {
+      message: 'file upload complete',
+      filename: req.file.filename,
+    },
     message: 'file upload complete',
     filename: req.file.filename,
   });
@@ -136,7 +141,7 @@ router.post('/process', (req, res) => {
       if (parsed && typeof parsed === 'object' && Object.prototype.hasOwnProperty.call(parsed, 'ok')) {
         return res.json(parsed);
       }
-      return res.json({ ok: true, ...(parsed || {}) });
+      return res.json({ ok: true, data: parsed || {}, ...(parsed || {}) });
     } catch (parseErr) {
       return res.status(500).json({
         ok: false,
@@ -152,9 +157,10 @@ router.post('/process', (req, res) => {
 });
 
 router.post('/generate-graph', (req, res) => {
-  const { xColumn, yColumn, data } = req.body || {};
+  const { xColumn, yColumn, data, graphType } = req.body || {};
+  const isHistogram = String(graphType || '').toLowerCase() === 'histogram';
 
-  if (!xColumn || !yColumn || !data) {
+  if (!xColumn || (!isHistogram && !yColumn) || !data) {
     return res.status(400).json({
       ok: false,
       code: 'GRAPH_MISSING_ARGS',
@@ -167,7 +173,8 @@ router.post('/generate-graph', (req, res) => {
     'scripts/generate_graph.py',
     JSON.stringify(data),
     xColumn,
-    yColumn,
+    yColumn || '',
+    String(graphType || 'scatter'),
   ]);
 
   const imageBuffer = [];
@@ -193,7 +200,7 @@ router.post('/generate-graph', (req, res) => {
     }
 
     const image = Buffer.concat(imageBuffer).toString('base64');
-    return res.json({ ok: true, image });
+    return res.json({ ok: true, data: { image }, image });
   });
 
   return undefined;

@@ -34,7 +34,8 @@ router.post('/prepare', async (req, res) => {
       }
       try {
         const obj = JSON.parse(out);
-        return res.json({ ok: true, ...(obj || {}) });
+        if (obj && obj.ok === false) return res.status(400).json(obj);
+        return res.json({ ok: true, data: obj || {} });
       } catch {
         return res.status(500).json({
           ok: false,
