@@ -2,6 +2,10 @@ try { require('dotenv').config(); } catch (_) {}
 const express = require('express');
 const http = require('http');
 const cors = require('cors');
+const apiKeyAuth = require('./middleware/apiKeyAuth');
+const requestLogger = require('./middleware/requestLogger');
+const sessionLock = require('./middleware/sessionLock');
+
 
 const pythonRoutes = require('./routes/python');
 const statRoutes = require('./routes/stat');
@@ -14,6 +18,7 @@ const { initializeWebSocket } = require('./services/socet');
 
 const app = express();
 const server = http.createServer(app);
+const pool = require('./config/db');
 
 app.use(cors({
   origin: '*',
@@ -23,26 +28,149 @@ app.use(cors({
 
 app.use(express.json({ limit: '25mb' }));
 
-function apiKeyGuard(req, res, next) {
-  const allowed = (process.env.ALLOWED_API_KEYS || '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const key = req.header('X-API-Key') || req.query.api_key;
+app.get('/auth/verify', apiKeyAuth, sessionLock, requestLogger, (req, res) => {
+  res.status(200).json({
+    ok: true,
+    message: 'API key is valid',
+    apiKey: req.apiKey,
+    session: req.sessionInfo,
+  });
+});
 
-  if (!key || !allowed.includes(key)) {
-    return res.status(401).json({
-      ok: false,
-      code: 'AUTH_INVALID_API_KEY',
-      message: 'Invalid or missing API key',
-      error: 'Invalid or missing API key',
-    });
+app.post('/auth/logout', apiKeyAuth, async (req, res) => {
+
+  try {
+
+    const clientId = req.header('X-Client-Id');
+
+    const sessionToken = req.header('X-Session-Token');
+
+
+
+    if (!clientId || !sessionToken) {
+
+      return res.status(400).json({
+
+        error: 'X-Client-Id and X-Session-Token are required',
+
+      });
+
+    }
+
+
+
+    await pool.query(
+
+      `
+
+      DELETE FROM active_sessions
+
+      WHERE api_key_id = $1
+
+        AND client_id = $2
+
+        AND session_token = $3
+
+      `,
+
+      [req.apiKey.id, clientId, sessionToken]
+
+    );
+
+
+
+    return res.json({ ok: true });
+
+  } catch (err) {
+
+    console.error('logout error:', err);
+
+    return res.status(500).json({ error: 'Internal server error' });
+
   }
-  return next();
-}
 
-app.get('/auth/verify', apiKeyGuard, (req, res) => {
-  res.json({ ok: true });
+});
+
+
+
+app.post('/auth/heartbeat', apiKeyAuth, async (req, res) => {
+
+  try {
+
+    const clientId = req.header('X-Client-Id');
+
+    const sessionToken = req.header('X-Session-Token');
+
+
+
+    if (!clientId || !sessionToken) {
+
+      return res.status(400).json({
+
+        error: 'X-Client-Id and X-Session-Token are required',
+
+      });
+
+    }
+
+
+
+    const result = await pool.query(
+
+      `
+
+      UPDATE active_sessions
+
+      SET last_heartbeat_at = NOW(),
+
+          expires_at = NOW() + interval '5 minutes',
+
+          ip_address = $1,
+
+          user_agent = $2
+
+      WHERE api_key_id = $3
+
+        AND client_id = $4
+
+        AND session_token = $5
+
+        AND expires_at > NOW()
+
+      RETURNING id
+
+      `,
+
+      [req.ip || null, req.get('user-agent') || null, req.apiKey.id, clientId, sessionToken]
+
+    );
+
+
+
+    if (result.rows.length === 0) {
+
+      return res.status(409).json({
+
+        error: 'Session expired or invalid',
+
+        code: 'SESSION_INVALID',
+
+      });
+
+    }
+
+
+
+    return res.json({ ok: true });
+
+  } catch (err) {
+
+    console.error('heartbeat error:', err);
+
+    return res.status(500).json({ error: 'Internal server error' });
+
+  }
+
 });
 
 // Public health endpoint for runtime checks (no API key required)
@@ -55,13 +183,13 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 // - /stat: standardized statistics contract (/stat/run)
 // - /ml: model training playground (ML + neural baseline)
 // - /mcp: MCP-compatible discovery/call bridge
-app.use('/api', apiKeyGuard, pythonRoutes);
-app.use('/tmp-upload', apiKeyGuard, tmpUploadRoutes);
-app.use('/viz', apiKeyGuard, vizRoutes);
-app.use('/viz/aggregate', apiKeyGuard, aggregateRoutes);
-app.use('/stat', apiKeyGuard, statRoutes);
-app.use('/ml', apiKeyGuard, mlRoutes);
-app.use('/mcp', apiKeyGuard, mcpRoutes);
+app.use('/api', apiKeyAuth,sessionLock, requestLogger, pythonRoutes);
+app.use('/tmp-upload', apiKeyAuth,sessionLock, requestLogger, tmpUploadRoutes);
+app.use('/viz', apiKeyAuth,sessionLock, requestLogger, vizRoutes);
+app.use('/viz/aggregate', apiKeyAuth,sessionLock, requestLogger, aggregateRoutes);
+app.use('/stat', apiKeyAuth,sessionLock, requestLogger, statRoutes);
+app.use('/ml', apiKeyAuth,sessionLock, requestLogger, mlRoutes);
+app.use('/mcp', apiKeyAuth,sessionLock, requestLogger, mcpRoutes);
 
 initializeWebSocket(server);
 

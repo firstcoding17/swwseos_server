@@ -1,0 +1,77 @@
+# env
+
+.env
+
+.env.*
+
+!.env.example
+
+
+
+# dependencies
+
+node_modules/
+
+
+
+# logs
+
+logs/
+
+*.log
+
+npm-debug.log*
+
+yarn-debug.log*
+
+yarn-error.log*
+
+pnpm-debug.log*
+
+
+
+# runtime / process
+
+.pnpm-store/
+
+.tmp/
+
+temp/
+
+tmp/
+
+
+
+# OS / editor
+
+.DS_Store
+
+Thumbs.db
+
+.vscode/
+
+.idea/
+
+
+
+# Python cache (if any scripts generate these)
+
+__pycache__/
+
+*.pyc
+
+
+
+# local database / dumps / backups
+
+*.sql.bak
+
+*.dump
+
+*.bak
+
+
+
+# PM2 local dump files
+
+.pm2/
