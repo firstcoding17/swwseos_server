@@ -1,209 +1,167 @@
 const express = require('express');
-const multer = require('multer');
-const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const multer = require('multer');
+const { spawn } = require('child_process');
 
 const router = express.Router();
-const PYTHON_BIN = process.env.PYTHON_BIN || 'python';
+const uploadsDir = path.join(__dirname, '..', 'uploads');
+const scriptsDir = path.join(__dirname, '..', 'scripts');
+
+fs.mkdirSync(uploadsDir, { recursive: true });
 
 const storage = multer.diskStorage({
-  destination(req, file, cb) {
-    cb(null, path.join(__dirname, '../uploads'));
+  destination(_req, _file, callback) {
+    callback(null, uploadsDir);
   },
-  filename(req, file, cb) {
-    cb(null, `${Date.now()}-${file.originalname}`);
+  filename(_req, file, callback) {
+    callback(null, `${Date.now()}-${file.originalname}`);
   },
 });
 
-const uploadData = multer({ storage });
+const upload = multer({ storage });
 
-router.post('/run-python', (req, res) => {
-  const scriptName = String(req.body?.scriptName || '').trim();
-  const args = Array.isArray(req.body?.args) ? req.body.args.map((v) => String(v)) : [];
+function pythonCommand() {
+  if (process.env.PYTHON_BIN) return process.env.PYTHON_BIN;
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
 
-  if (!/^[A-Za-z0-9_-]+$/.test(scriptName)) {
-    return res.status(400).json({
-      ok: false,
-      code: 'RUN_PYTHON_INVALID_SCRIPT',
-      message: 'invalid script name',
-      error: 'invalid script name',
-    });
+function parseLastJson(stdout) {
+  const lines = String(stdout || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    throw new Error('python script returned empty stdout');
   }
+  return JSON.parse(lines[lines.length - 1]);
+}
 
-  const scriptsDir = path.resolve(__dirname, '../scripts');
-  const scriptPath = path.join(scriptsDir, `${scriptName}.py`);
-  if (!fs.existsSync(scriptPath)) {
-    return res.status(404).json({
-      ok: false,
-      code: 'RUN_PYTHON_SCRIPT_NOT_FOUND',
-      message: 'python script not found',
-      details: { scriptName },
-      error: 'python script not found',
+function runPythonScript(scriptFile, args = [], options = {}) {
+  const capture = options.capture || 'text';
+  return new Promise((resolve, reject) => {
+    const child = spawn(pythonCommand(), [path.join(scriptsDir, scriptFile), ...args], {
+      cwd: path.join(__dirname, '..'),
+      env: {
+        ...process.env,
+        PYTHONIOENCODING: 'utf-8',
+        PYTHONUTF8: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
-  }
 
-  const py = spawn(PYTHON_BIN, [scriptPath, ...args], {
-    env: { ...process.env, PYTHONUTF8: '1' },
-    cwd: path.resolve(__dirname, '..'),
-    stdio: ['ignore', 'pipe', 'pipe'],
+    const stdoutChunks = [];
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      stdoutChunks.push(Buffer.from(chunk));
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        return reject(new Error(stderr.trim() || `python exited with code ${code}`));
+      }
+      const stdoutBuffer = Buffer.concat(stdoutChunks);
+      if (capture === 'buffer') return resolve(stdoutBuffer);
+      return resolve(stdoutBuffer.toString('utf8'));
+    });
   });
+}
 
-  let out = '';
-  let err = '';
-  py.stdout.on('data', (d) => (out += d.toString()));
-  py.stderr.on('data', (d) => (err += d.toString()));
-
-  py.on('close', (code) => {
-    if (code !== 0) {
-      return res.status(500).json({
-        ok: false,
-        code: 'RUN_PYTHON_FAILED',
-        message: 'python script execution failed',
-        details: err,
-        error: 'python script execution failed',
-      });
-    }
-    const text = out.trim();
-    try {
-      const output = JSON.parse(text || '{}');
-      return res.json({ ok: true, data: { output }, output });
-    } catch {
-      return res.json({ ok: true, data: { output: text }, output: text });
-    }
-  });
-
-  return undefined;
-});
-
-router.post('/upload', uploadData.single('file'), (req, res) => {
+router.post('/upload', upload.single('file'), (req, res) => {
   if (!req.file) {
-    return res.status(400).json({
-      ok: false,
-      code: 'UPLOAD_MISSING_FILE',
-      message: 'file upload failed',
-      error: 'file upload failed',
-    });
+    return res.status(400).json({ ok: false, error: 'file upload failed' });
   }
-
   return res.json({
     ok: true,
-    data: {
-      message: 'file upload complete',
-      filename: req.file.filename,
-    },
-    message: 'file upload complete',
+    message: 'file uploaded',
     filename: req.file.filename,
   });
 });
 
-router.post('/process', (req, res) => {
-  const filename = req.body?.filename;
-  if (!filename) {
-    return res.status(400).json({
+router.post('/process', async (req, res) => {
+  try {
+    const filename = String(req.body?.filename || '').trim();
+    if (!filename) {
+      return res.status(400).json({ ok: false, error: 'filename is required' });
+    }
+
+    const filePath = path.join(uploadsDir, filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ ok: false, error: 'uploaded file not found' });
+    }
+
+    const stdout = await runPythonScript('load_file.py', [filePath]);
+    return res.json(parseLastJson(stdout));
+  } catch (error) {
+    return res.status(500).json({
       ok: false,
-      code: 'PROCESS_MISSING_FILENAME',
-      message: 'file process failed: missing filename',
-      error: 'file process failed: missing filename',
+      error: 'python process failed',
+      details: error.message,
     });
   }
-
-  const filePath = path.join(__dirname, '../uploads', filename);
-
-  const pythonProcess = spawn(PYTHON_BIN, ['scripts/load_file.py', filePath], {
-    env: { ...process.env, PYTHONUTF8: '1' },
-  });
-
-  let out = '';
-  let err = '';
-
-  pythonProcess.stdout.on('data', (data) => {
-    out += data.toString();
-  });
-
-  pythonProcess.stderr.on('data', (data) => {
-    err += data.toString();
-  });
-
-  pythonProcess.on('close', (code) => {
-    if (code !== 0) {
-      return res.status(500).json({
-        ok: false,
-        code: 'PROCESS_PYTHON_FAILED',
-        message: 'python script failed',
-        details: err,
-        error: 'python script failed',
-      });
-    }
-
-    try {
-      const parsed = JSON.parse(out);
-      if (parsed && typeof parsed === 'object' && Object.prototype.hasOwnProperty.call(parsed, 'ok')) {
-        return res.json(parsed);
-      }
-      return res.json({ ok: true, data: parsed || {}, ...(parsed || {}) });
-    } catch (parseErr) {
-      return res.status(500).json({
-        ok: false,
-        code: 'PROCESS_INVALID_JSON',
-        message: 'invalid json from python',
-        details: String(parseErr),
-        error: 'invalid json from python',
-      });
-    }
-  });
-
-  return undefined;
 });
 
-router.post('/generate-graph', (req, res) => {
-  const { xColumn, yColumn, data, graphType } = req.body || {};
-  const isHistogram = String(graphType || '').toLowerCase() === 'histogram';
-
-  if (!xColumn || (!isHistogram && !yColumn) || !data) {
-    return res.status(400).json({
-      ok: false,
-      code: 'GRAPH_MISSING_ARGS',
-      message: 'required graph args are missing',
-      error: 'required graph args are missing',
-    });
-  }
-
-  const pythonProcess = spawn(PYTHON_BIN, [
-    'scripts/generate_graph.py',
-    JSON.stringify(data),
-    xColumn,
-    yColumn || '',
-    String(graphType || 'scatter'),
-  ]);
-
-  const imageBuffer = [];
-  let err = '';
-
-  pythonProcess.stdout.on('data', (chunk) => {
-    imageBuffer.push(chunk);
-  });
-
-  pythonProcess.stderr.on('data', (chunk) => {
-    err += chunk.toString();
-  });
-
-  pythonProcess.on('close', (code) => {
-    if (code !== 0) {
-      return res.status(500).json({
+router.post('/generate-graph', async (req, res) => {
+  try {
+    const { xColumn, yColumn, data } = req.body || {};
+    if (!xColumn || !yColumn || !Array.isArray(data)) {
+      return res.status(400).json({
         ok: false,
-        code: 'GRAPH_PYTHON_FAILED',
-        message: 'graph generation failed',
-        details: err,
-        error: 'graph generation failed',
+        error: 'xColumn, yColumn, and data are required',
       });
     }
 
-    const image = Buffer.concat(imageBuffer).toString('base64');
-    return res.json({ ok: true, data: { image }, image });
-  });
+    const imageBuffer = await runPythonScript(
+      'generate_graph.py',
+      [JSON.stringify(data), String(xColumn), String(yColumn)],
+      { capture: 'buffer' }
+    );
 
-  return undefined;
+    return res.json({
+      ok: true,
+      image: imageBuffer.toString('base64'),
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: 'graph generation failed',
+      details: error.message,
+    });
+  }
+});
+
+router.post('/run-python', async (req, res) => {
+  try {
+    const scriptName = String(req.body?.scriptName || '').trim();
+    const args = Array.isArray(req.body?.args) ? req.body.args.map((arg) => String(arg)) : [];
+    if (!scriptName || scriptName.includes('/') || scriptName.includes('\\')) {
+      return res.status(400).json({
+        ok: false,
+        error: 'scriptName is required',
+      });
+    }
+
+    const stdout = await runPythonScript(`${scriptName}.py`, args);
+    const lines = String(stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    return res.json({
+      ok: true,
+      output: lines,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: 'python script execution failed',
+      details: error.message,
+    });
+  }
 });
 
 module.exports = router;

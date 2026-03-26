@@ -4,7 +4,7 @@ if len(sys.argv) < 3:
     print(json.dumps({"error": "usage: correlation.py <filePath> <columnOrAll>"})); sys.exit(1)
 
 file_path = sys.argv[1]
-# Keep the second arg for frontend compatibility, even if unused.
+# 두 번째 인자는 안 써도 되게 해두지만, 프론트 구조 유지용으로 받음
 _ = sys.argv[2]
 
 df = pd.read_csv(file_path)

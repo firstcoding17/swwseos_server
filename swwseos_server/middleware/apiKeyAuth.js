@@ -1,139 +1,83 @@
 const crypto = require('crypto');
-
 const pool = require('../config/db');
 
-
-
-function hashApiKey(apiKey) {
-
-  return crypto.createHash('sha256').update(apiKey).digest('hex');
-
+function hashApiKey(rawKey) {
+  return crypto.createHash('sha256').update(String(rawKey || ''), 'utf8').digest('hex');
 }
 
+function publicApiKeyRecord(row) {
+  return {
+    id: row.id,
+    keyPrefix: row.key_prefix,
+    ownerName: row.owner_name || null,
+    label: row.label || null,
+    status: row.status,
+    expiresAt: row.expires_at,
+    minuteLimit: row.minute_limit,
+    dailyLimit: row.daily_limit,
+  };
+}
 
-
-async function apiKeyAuth(req, res, next) {
-
+module.exports = async function apiKeyAuth(req, res, next) {
   try {
-
-    const rawApiKey = req.header('X-API-Key');
-
-
-
-    if (!rawApiKey) {
-
-      return res.status(401).json({ error: 'API key is required' });
-
+    const rawKey = String(req.header('X-API-Key') || '').trim();
+    if (!rawKey) {
+      return res.status(401).json({
+        ok: false,
+        code: 'API_KEY_REQUIRED',
+        error: 'X-API-Key header is required',
+      });
     }
 
-
-
-    const keyHash = hashApiKey(rawApiKey);
-
-    const keyPrefix = rawApiKey.slice(0, 12);
-
-
-
+    const keyPrefix = rawKey.slice(0, 20);
+    const keyHash = hashApiKey(rawKey);
     const result = await pool.query(
-
       `
-
-      SELECT *
-
-      FROM api_keys
-
-      WHERE key_prefix = $1
-
-        AND key_hash = $2
-
-      LIMIT 1
-
+        SELECT *
+        FROM api_keys
+        WHERE key_prefix = $1
+          AND key_hash = $2
+          AND status = 'active'
+          AND (expires_at IS NULL OR expires_at > NOW())
+        LIMIT 1
       `,
-
       [keyPrefix, keyHash]
-
     );
 
-
-
-    if (result.rows.length === 0) {
-
-      return res.status(401).json({ error: 'Invalid API key' });
-
+    if (!result.rows.length) {
+      return res.status(401).json({
+        ok: false,
+        code: 'API_KEY_INVALID',
+        error: 'API key is invalid or expired',
+      });
     }
 
-
-
-    const apiKeyRow = result.rows[0];
-
-
-
-    if (apiKeyRow.status !== 'active') {
-
-      return res.status(403).json({ error: 'API key is not active' });
-
-    }
-
-
-
-    if (apiKeyRow.expires_at && new Date(apiKeyRow.expires_at) < new Date()) {
-
-      return res.status(403).json({ error: 'API key has expired' });
-
-    }
-
-
+    const row = result.rows[0];
+    req.apiKey = publicApiKeyRecord(row);
+    req.apiKeyRaw = rawKey;
 
     await pool.query(
-
       `
-
-      UPDATE api_keys
-
-      SET last_used_at = NOW(),
-
-          last_ip = $1,
-
-          last_user_agent = $2
-
-      WHERE id = $3
-
+        UPDATE api_keys
+        SET last_used_at = NOW(),
+            last_ip = $1,
+            last_user_agent = $2
+        WHERE id = $3
       `,
-
-      [req.ip, req.get('user-agent') || null, apiKeyRow.id]
-
+      [
+        String(req.ip || '').replace(/^::ffff:/, '') || null,
+        req.get('user-agent') || null,
+        row.id,
+      ]
     );
 
-
-
-    req.apiKey = {
-
-      id: apiKeyRow.id,
-
-      ownerName: apiKeyRow.owner_name,
-
-      label: apiKeyRow.label,
-
-      minuteLimit: apiKeyRow.minute_limit,
-
-      dailyLimit: apiKeyRow.daily_limit,
-
-    };
-
-
-
-    next();
-
-  } catch (err) {
-
-    console.error('apiKeyAuth error:', err);
-
-    return res.status(500).json({ error: 'Internal server error' });
-
+    return next();
+  } catch (error) {
+    console.error('apiKeyAuth error:', error);
+    return res.status(500).json({
+      ok: false,
+      code: 'API_KEY_AUTH_ERROR',
+      error: 'Internal server error',
+    });
   }
-
-}
-
-
-
-module.exports = apiKeyAuth;
+};

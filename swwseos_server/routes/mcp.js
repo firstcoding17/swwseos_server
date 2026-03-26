@@ -1,89 +1,87 @@
 const express = require('express');
-const {
-  createMcpRequestGuard,
-} = require('../services/mcpRequestGuards');
-const {
-  executeTool,
-} = require('../services/mcpToolExecutor');
+const { createMcpRequestGuard } = require('../services/mcpRequestGuards');
 const {
   buildInfoData,
   buildToolsData,
-  runChatRequest,
   runCallRequest,
+  runChatRequest,
 } = require('../services/mcpRouteHandlers');
+const { executeTool } = require('../services/mcpToolExecutor');
 
 const router = express.Router();
-const MCP_MAX_CONTEXT_ROWS = 120;
-const MCP_MAX_TOOL_ROWS = 500;
-const MCP_MAX_WORKSPACE_DATASETS = 4;
-const MCP_MAX_HISTORY_MESSAGES = 8;
-const MCP_MAX_MESSAGE_CHARS = 2000;
 
-router.use(createMcpRequestGuard({
-  contextRowLimit: MCP_MAX_CONTEXT_ROWS,
-  toolRowLimit: MCP_MAX_TOOL_ROWS,
-  workspaceDatasetLimit: MCP_MAX_WORKSPACE_DATASETS,
-  historyLimit: MCP_MAX_HISTORY_MESSAGES,
-  messageCharLimit: MCP_MAX_MESSAGE_CHARS,
-}));
+function sendError(res, error) {
+  return res.status(error?.status || 500).json({
+    ok: false,
+    code: error?.code || 'MCP_ROUTE_ERROR',
+    message: error?.exposeMessage || error?.message || 'Internal server error',
+    details: error?.details,
+    error: error?.exposeMessage || error?.message || 'Internal server error',
+  });
+}
 
-const runToolInternal = (tool, input, keyHeader, datasetContext = {}) =>
-  executeTool({
+async function runToolInternal(tool, input, keyHeader, datasetContext) {
+  return executeTool({
     tool,
     input,
     keyHeader,
     datasetContext,
-    contextRowLimit: MCP_MAX_CONTEXT_ROWS,
-    toolRowLimit: MCP_MAX_TOOL_ROWS,
   });
+}
 
-router.get('/info', (_req, res) => {
-  return res.json({ ok: true, data: buildInfoData() });
+router.use(createMcpRequestGuard());
+
+router.get('/info', (req, res) => {
+  return res.json({
+    ok: true,
+    data: buildInfoData(),
+  });
 });
 
-router.get('/tools', (_req, res) => {
-  return res.json({ ok: true, data: buildToolsData() });
-});
-
-router.post('/chat', async (req, res) => {
-  try {
-    const data = await runChatRequest({
-      message: req.body?.message,
-      datasetContext: req.body?.datasetContext || {},
-      history: req.body?.history || [],
-      keyHeader: req.header('X-API-Key'),
-      runToolInternal,
-    });
-    return res.json({ ok: true, data });
-  } catch (e) {
-    return res.status(e.status || 500).json({
-      ok: false,
-      code: e.code || 'MCP_CHAT_EXCEPTION',
-      message: e.exposeMessage || e.message || 'mcp chat exception',
-      details: e.details || String(e),
-      error: 'mcp chat exception',
-    });
-  }
+router.get('/tools', (req, res) => {
+  return res.json({
+    ok: true,
+    data: buildToolsData(),
+  });
 });
 
 router.post('/call', async (req, res) => {
   try {
+    const authHeaders = {
+      'X-API-Key': req.get('X-API-Key') || '',
+      'X-Client-Id': req.get('X-Client-Id') || '',
+      'X-Session-Token': req.get('X-Session-Token') || '',
+    };
     const data = await runCallRequest({
       tool: req.body?.tool,
       input: req.body?.input,
-      keyHeader: req.header('X-API-Key'),
-      datasetContext: req.body?.datasetContext || {},
+      datasetContext: req.body?.datasetContext,
+      keyHeader: authHeaders,
       runToolInternal,
     });
     return res.json({ ok: true, data });
-  } catch (e) {
-    return res.status(e.status || 500).json({
-      ok: false,
-      code: e.code || 'MCP_CALL_EXCEPTION',
-      message: e.message || 'mcp call exception',
-      details: e.details || String(e),
-      error: 'mcp call exception',
+  } catch (error) {
+    return sendError(res, error);
+  }
+});
+
+router.post('/chat', async (req, res) => {
+  try {
+    const authHeaders = {
+      'X-API-Key': req.get('X-API-Key') || '',
+      'X-Client-Id': req.get('X-Client-Id') || '',
+      'X-Session-Token': req.get('X-Session-Token') || '',
+    };
+    const data = await runChatRequest({
+      message: req.body?.message,
+      datasetContext: req.body?.datasetContext,
+      history: req.body?.history,
+      keyHeader: authHeaders,
+      runToolInternal,
     });
+    return res.json({ ok: true, data });
+  } catch (error) {
+    return sendError(res, error);
   }
 });
 

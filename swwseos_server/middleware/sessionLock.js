@@ -1,177 +1,102 @@
-const crypto = require('crypto');
+const {
+  cleanupExpiredSessions,
+  createSession,
+  findActiveSession,
+  serializeSession,
+  touchSessionById,
+} = require('../services/authSessions');
 
-const pool = require('../config/db');
-
-
-
-const SESSION_TTL_SECONDS = 300; // 5분
-
-
-
-function makeSessionToken() {
-
-  return crypto.randomBytes(24).toString('hex');
-
+function isVerifyRequest(req) {
+  return String(req.originalUrl || '').startsWith('/auth/verify');
 }
 
-
-
-async function sessionLock(req, res, next) {
-
+module.exports = async function sessionLock(req, res, next) {
   try {
-
-    if (!req.apiKey?.id) {
-
-      return res.status(500).json({ error: 'API key context missing' });
-
-    }
-
-
-
-    const apiKeyId = req.apiKey.id;
-
-    const clientId = req.header('X-Client-Id');
-
-    const userAgent = req.get('user-agent') || null;
-
-    const ipAddress = req.ip || null;
-
-
+    const apiKeyId = req.apiKey?.id;
+    const clientId = String(req.header('X-Client-Id') || '').trim();
+    const sessionToken = String(req.header('X-Session-Token') || '').trim();
 
     if (!clientId) {
-
-      return res.status(400).json({ error: 'X-Client-Id is required' });
-
+      return res.status(400).json({
+        ok: false,
+        code: 'CLIENT_ID_REQUIRED',
+        error: 'X-Client-Id header is required',
+      });
     }
 
+    await cleanupExpiredSessions(apiKeyId);
+    const activeSession = await findActiveSession(apiKeyId);
 
-
-    const current = await pool.query(
-
-      `
-
-      SELECT *
-
-      FROM active_sessions
-
-      WHERE api_key_id = $1
-
-        AND expires_at > NOW()
-
-      ORDER BY created_at DESC
-
-      LIMIT 1
-
-      `,
-
-      [apiKeyId]
-
-    );
-
-
-
-    if (current.rows.length > 0) {
-
-      const session = current.rows[0];
-
-
-
-      if (session.client_id !== clientId) {
-
-        return res.status(409).json({
-
-          error: 'This API key is already in use on another client',
-
-          code: 'SESSION_ALREADY_ACTIVE',
-
+    if (isVerifyRequest(req)) {
+      if (!activeSession) {
+        const created = await createSession({
+          apiKeyId,
+          clientId,
+          ipAddress: req.ip,
+          userAgent: req.get('user-agent'),
         });
-
+        req.sessionInfo = serializeSession(created);
+        res.set('X-Session-Token', created.session_token);
+        return next();
       }
 
+      if (String(activeSession.client_id) !== clientId) {
+        return res.status(409).json({
+          ok: false,
+          code: 'SESSION_LOCKED',
+          error: 'This API key is already being used by another client',
+        });
+      }
 
-
-      req.sessionInfo = {
-
-        sessionToken: session.session_token,
-
-        clientId: session.client_id,
-
-      };
-
-
-
+      const touched = await touchSessionById(activeSession.id, {
+        ipAddress: req.ip,
+        userAgent: req.get('user-agent'),
+      });
+      req.sessionInfo = serializeSession(touched);
+      res.set('X-Session-Token', touched.session_token);
       return next();
-
     }
 
+    if (!activeSession) {
+      return res.status(401).json({
+        ok: false,
+        code: 'SESSION_REQUIRED',
+        error: 'No active session found. Verify the API key first.',
+      });
+    }
 
+    if (String(activeSession.client_id) !== clientId) {
+      return res.status(409).json({
+        ok: false,
+        code: 'SESSION_LOCKED',
+        error: 'This API key is already being used by another client',
+      });
+    }
 
-    const sessionToken = makeSessionToken();
+    if (!sessionToken) {
+      return res.status(401).json({
+        ok: false,
+        code: 'SESSION_TOKEN_REQUIRED',
+        error: 'X-Session-Token header is required',
+      });
+    }
 
+    if (String(activeSession.session_token) !== sessionToken) {
+      return res.status(401).json({
+        ok: false,
+        code: 'SESSION_TOKEN_INVALID',
+        error: 'Session token is invalid',
+      });
+    }
 
-
-    await pool.query(
-
-      `
-
-      INSERT INTO active_sessions (
-
-        api_key_id,
-
-        session_token,
-
-        client_id,
-
-        ip_address,
-
-        user_agent,
-
-        expires_at
-
-      )
-
-      VALUES (
-
-        $1, $2, $3, $4, $5,
-
-        NOW() + ($6 || ' seconds')::interval
-
-      )
-
-      `,
-
-      [apiKeyId, sessionToken, clientId, ipAddress, userAgent, SESSION_TTL_SECONDS]
-
-    );
-
-
-
-    req.sessionInfo = {
-
-      sessionToken,
-
-      clientId,
-
-    };
-
-
-
-    res.setHeader('X-Session-Token', sessionToken);
-
-
-
-    next();
-
-  } catch (err) {
-
-    console.error('sessionLock error:', err);
-
-    return res.status(500).json({ error: 'Internal server error' });
-
+    req.sessionInfo = serializeSession(activeSession);
+    return next();
+  } catch (error) {
+    console.error('sessionLock error:', error);
+    return res.status(500).json({
+      ok: false,
+      code: 'SESSION_LOCK_ERROR',
+      error: 'Internal server error',
+    });
   }
-
-}
-
-
-
-module.exports = sessionLock;
+};
