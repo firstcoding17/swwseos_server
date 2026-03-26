@@ -1,200 +1,181 @@
-try { require('dotenv').config(); } catch (_) {}
-const express = require('express');
-const http = require('http');
-const cors = require('cors');
-const apiKeyAuth = require('./middleware/apiKeyAuth');
-const requestLogger = require('./middleware/requestLogger');
-const sessionLock = require('./middleware/sessionLock');
+const assert = require("assert");
+const http = require("http");
+const express = require("express");
+const mcpRoutes = require("../routes/mcp");
+const statRoutes = require("../routes/stat");
+const vizRoutes = require("../routes/viz");
+const mlRoutes = require("../routes/ml");
 
+function pass(msg) {
+  console.log(`[PASS] ${msg}`);
+}
 
-const pythonRoutes = require('./routes/python');
-const statRoutes = require('./routes/stat');
-const tmpUploadRoutes = require('./routes/tmp-upload');
-const vizRoutes = require('./routes/viz');
-const aggregateRoutes = require('./routes/aggregate');
-const mlRoutes = require('./routes/ml');
-const mcpRoutes = require('./routes/mcp');
-const { initializeWebSocket } = require('./services/socet');
+function fail(msg, err) {
+  console.error(`[FAIL] ${msg}`);
+  if (err) console.error(err);
+  process.exitCode = 1;
+}
 
-const app = express();
-const server = http.createServer(app);
-const pool = require('./config/db');
-
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'X-API-Key'],
-}));
-
-app.use(express.json({ limit: '25mb' }));
-
-app.get('/auth/verify', apiKeyAuth, sessionLock, requestLogger, (req, res) => {
-  res.status(200).json({
-    ok: true,
-    message: 'API key is valid',
-    apiKey: req.apiKey,
-    session: req.sessionInfo,
+function requestJson(server, method, path, body) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? Buffer.from(JSON.stringify(body), "utf8") : Buffer.from("", "utf8");
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: server.address().port,
+        path,
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": payload.length,
+        },
+      },
+      (res) => {
+        let raw = "";
+        res.on("data", (d) => (raw += d.toString("utf8")));
+        res.on("end", () => {
+          try {
+            resolve({
+              status: res.statusCode,
+              body: JSON.parse(raw || "{}"),
+            });
+          } catch (e) {
+            reject(new Error(`invalid json: ${raw}`));
+          }
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(payload);
+    req.end();
   });
-});
+}
 
-app.post('/auth/logout', apiKeyAuth, async (req, res) => {
+function buildDatasetContext() {
+  return {
+    datasetId: "ds-manual",
+    datasetName: "retail_sales",
+    rowCount: 120,
+    columnCount: 4,
+    columns: ["sales", "margin", "region", "date"],
+    sampleRows: [
+      { sales: 10, margin: 2.0, region: "east", date: "2026-01-01" },
+      { sales: 12, margin: 2.6, region: "west", date: "2026-01-02" },
+      { sales: 11, margin: 2.3, region: "west", date: "2026-01-03" },
+      { sales: 15, margin: 3.9, region: "east", date: "2026-01-04" },
+      { sales: 16, margin: 4.1, region: "south", date: "2026-01-05" },
+      { sales: 18, margin: 4.8, region: "south", date: "2026-01-06" },
+    ],
+    profileSummary: {
+      duplicates: 0,
+      warnings: [],
+      topCorrCount: 2,
+      topAnovaCount: 1,
+    },
+  };
+}
 
-  try {
+async function run() {
+  const app = express();
+  app.use(express.json({ limit: "5mb" }));
+  app.use("/mcp", mcpRoutes);
+  app.use("/stat", statRoutes);
+  app.use("/viz", vizRoutes);
+  app.use("/ml", mlRoutes);
 
-    const clientId = req.header('X-Client-Id');
+  const previousBase = process.env.MCP_INTERNAL_BASE;
+  const previousPort = process.env.PORT;
 
-    const sessionToken = req.header('X-Session-Token');
+  const server = await new Promise((resolve) => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
+  });
 
-
-
-    if (!clientId || !sessionToken) {
-
-      return res.status(400).json({
-
-        error: 'X-Client-Id and X-Session-Token are required',
-
-      });
-
-    }
-
-
-
-    await pool.query(
-
-      `
-
-      DELETE FROM active_sessions
-
-      WHERE api_key_id = $1
-
-        AND client_id = $2
-
-        AND session_token = $3
-
-      `,
-
-      [req.apiKey.id, clientId, sessionToken]
-
-    );
-
-
-
-    return res.json({ ok: true });
-
-  } catch (err) {
-
-    console.error('logout error:', err);
-
-    return res.status(500).json({ error: 'Internal server error' });
-
-  }
-
-});
-
-
-
-app.post('/auth/heartbeat', apiKeyAuth, async (req, res) => {
+  process.env.MCP_INTERNAL_BASE = `http://127.0.0.1:${server.address().port}`;
+  process.env.PORT = String(server.address().port);
 
   try {
+    const datasetContext = buildDatasetContext();
 
-    const clientId = req.header('X-Client-Id');
-
-    const sessionToken = req.header('X-Session-Token');
-
-
-
-    if (!clientId || !sessionToken) {
-
-      return res.status(400).json({
-
-        error: 'X-Client-Id and X-Session-Token are required',
-
-      });
-
-    }
-
-
-
-    const result = await pool.query(
-
-      `
-
-      UPDATE active_sessions
-
-      SET last_heartbeat_at = NOW(),
-
-          expires_at = NOW() + interval '5 minutes',
-
-          ip_address = $1,
-
-          user_agent = $2
-
-      WHERE api_key_id = $3
-
-        AND client_id = $4
-
-        AND session_token = $5
-
-        AND expires_at > NOW()
-
-      RETURNING id
-
-      `,
-
-      [req.ip || null, req.get('user-agent') || null, req.apiKey.id, clientId, sessionToken]
-
+    const chatRes = await requestJson(server, "POST", "/mcp/chat", {
+      message: "what should I analyze first?",
+      datasetContext,
+    });
+    assert.equal(chatRes.status, 200);
+    assert.equal(chatRes.body.ok, true);
+    assert.equal(chatRes.body.data.mode, "rule-based");
+    assert.ok(Array.isArray(chatRes.body.data.cards));
+    assert.ok(chatRes.body.data.cards.length >= 1);
+    assert.ok(Array.isArray(chatRes.body.data.suggestions));
+    assert.ok(Array.isArray(chatRes.body.data.toolCalls));
+    assert.ok(chatRes.body.data.toolCalls.some((item) => item.tool === "stat.recommend"));
+    const statSuggestion = chatRes.body.data.suggestions.find(
+      (item) => item?.tool === "stat.run" && item?.inputTemplate?.op === "describe"
     );
+    assert.ok(statSuggestion);
+    pass("mcp manual flow starts with chat insights, stats recommender context, and a runnable stats suggestion");
 
+    const statRes = await requestJson(server, "POST", "/mcp/call", {
+      tool: statSuggestion.tool,
+      input: statSuggestion.inputTemplate,
+      datasetContext,
+    });
+    assert.equal(statRes.status, 200);
+    assert.equal(statRes.body.ok, true);
+    assert.equal(statRes.body.data.tool, "stat.run");
+    assert.equal(statRes.body.data.result.ok, true);
+    assert.equal(statRes.body.data.result.op, "describe");
+    assert.equal(typeof statRes.body.data.result.summary?.title, "string");
+    pass("mcp manual flow can execute the suggested stats action end-to-end");
 
+    const vizRes = await requestJson(server, "POST", "/mcp/call", {
+      tool: "viz.prepare",
+      input: {
+        spec: {
+          type: "scatter",
+          x: "sales",
+          y: "margin",
+          options: {
+            title: "Sales vs Margin",
+            xLabel: "Sales",
+            yLabel: "Margin",
+          },
+        },
+      },
+      datasetContext,
+    });
+    assert.equal(vizRes.status, 200);
+    assert.equal(vizRes.body.ok, true);
+    assert.equal(vizRes.body.data.tool, "viz.prepare");
+    assert.equal(vizRes.body.data.result.ok, true);
+    assert.equal(typeof vizRes.body.data.result.data?.fig_json, "string");
+    pass("mcp manual flow can prepare a visualization result through the MCP bridge");
 
-    if (result.rows.length === 0) {
+    const mlRes = await requestJson(server, "POST", "/mcp/call", {
+      tool: "ml.capabilities",
+      input: {},
+      datasetContext,
+    });
+    assert.equal(mlRes.status, 200);
+    assert.equal(mlRes.body.ok, true);
+    assert.equal(mlRes.body.data.tool, "ml.capabilities");
+    assert.equal(mlRes.body.data.result.ok, true);
+    assert.equal(typeof mlRes.body.data.result.data?.sklearn, "boolean");
+    pass("mcp manual flow can inspect ML capability results through the MCP bridge");
 
-      return res.status(409).json({
-
-        error: 'Session expired or invalid',
-
-        code: 'SESSION_INVALID',
-
-      });
-
+    if (!process.exitCode) {
+      console.log("[OK] MCP manual-flow checks passed.");
     }
+  } catch (e) {
+    fail("mcp manual-flow checks failed", e);
+  } finally {
+    if (previousBase === undefined) delete process.env.MCP_INTERNAL_BASE;
+    else process.env.MCP_INTERNAL_BASE = previousBase;
 
+    if (previousPort === undefined) delete process.env.PORT;
+    else process.env.PORT = previousPort;
 
-
-    return res.json({ ok: true });
-
-  } catch (err) {
-
-    console.error('heartbeat error:', err);
-
-    return res.status(500).json({ error: 'Internal server error' });
-
+    await new Promise((resolve) => server.close(resolve));
   }
+}
 
-});
-
-// Public health endpoint for runtime checks (no API key required)
-app.get('/healthz', (req, res) => res.json({ ok: true }));
-
-// Guarded API surface
-// - /api: legacy compatibility endpoints (upload/process/generate-graph/run-python)
-// - /tmp-upload: optional temporary upload signing/deletion
-// - /viz, /viz/aggregate: new visualization preparation/aggregation
-// - /stat: standardized statistics contract (/stat/run)
-// - /ml: model training playground (ML + neural baseline)
-// - /mcp: MCP-compatible discovery/call bridge
-app.use('/api', apiKeyAuth,sessionLock, requestLogger, pythonRoutes);
-app.use('/tmp-upload', apiKeyAuth,sessionLock, requestLogger, tmpUploadRoutes);
-app.use('/viz', apiKeyAuth,sessionLock, requestLogger, vizRoutes);
-app.use('/viz/aggregate', apiKeyAuth,sessionLock, requestLogger, aggregateRoutes);
-app.use('/stat', apiKeyAuth,sessionLock, requestLogger, statRoutes);
-app.use('/ml', apiKeyAuth,sessionLock, requestLogger, mlRoutes);
-app.use('/mcp', apiKeyAuth,sessionLock, requestLogger, mcpRoutes);
-
-initializeWebSocket(server);
-
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
-
+run();
