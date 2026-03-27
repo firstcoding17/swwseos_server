@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { isE2ETestMode, recordUsage } = require('../lib/e2eRuntime');
 
 function featureCodeFromPath(pathname) {
   const path = String(pathname || '');
@@ -23,6 +24,20 @@ module.exports = function requestLogger(req, res, next) {
     const endpoint = String(req.originalUrl || req.path || '').split('?')[0] || '/';
     const featureCode = featureCodeFromPath(endpoint);
     const responseTimeMs = Date.now() - startedAt;
+
+    if (isE2ETestMode()) {
+      recordUsage({
+        apiKeyId,
+        featureCode,
+        endpoint,
+        method: req.method,
+        statusCode: res.statusCode,
+        responseTimeMs,
+        ipAddress: String(req.ip || '').replace(/^::ffff:/, '') || null,
+        userAgent: req.get('user-agent') || null,
+      });
+      return;
+    }
 
     pool.query(
       `

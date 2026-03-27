@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const pool = require('../config/db');
+const { buildApiKeyRecord, getConfiguredTestApiKey, isE2ETestMode } = require('../lib/e2eRuntime');
 
 function hashApiKey(rawKey) {
   return crypto.createHash('sha256').update(String(rawKey || ''), 'utf8').digest('hex');
@@ -27,6 +28,20 @@ module.exports = async function apiKeyAuth(req, res, next) {
         code: 'API_KEY_REQUIRED',
         error: 'X-API-Key header is required',
       });
+    }
+
+    if (isE2ETestMode()) {
+      if (rawKey !== getConfiguredTestApiKey()) {
+        return res.status(401).json({
+          ok: false,
+          code: 'API_KEY_INVALID',
+          error: 'API key is invalid or expired',
+        });
+      }
+
+      req.apiKey = buildApiKeyRecord(rawKey);
+      req.apiKeyRaw = rawKey;
+      return next();
     }
 
     const keyPrefix = rawKey.slice(0, 20);

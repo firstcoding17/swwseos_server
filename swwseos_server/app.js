@@ -15,6 +15,7 @@ const mlRoutes = require('./routes/ml');
 const mcpRoutes = require('./routes/mcp');
 const { initializeWebSocket } = require('./services/socket');
 const { deleteSession, serializeSession, touchSessionByToken } = require('./services/authSessions');
+const { getE2EState, isE2ETestMode, resetE2EState } = require('./lib/e2eRuntime');
 
 const app = express();
 const server = http.createServer(app);
@@ -111,6 +112,15 @@ app.post('/auth/logout', apiKeyAuth, async (req, res) => {
 });
 
 app.get('/healthz', (_req, res) => res.json({ ok: true }));
+
+if (isE2ETestMode()) {
+  app.post('/__e2e__/reset', (_req, res) => {
+    resetE2EState();
+    return res.json({ ok: true });
+  });
+
+  app.get('/__e2e__/state', (_req, res) => res.json(getE2EState()));
+}
 
 const guarded = [apiKeyAuth, sessionLock, requestLogger];
 

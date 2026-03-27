@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const pool = require('../config/db');
+const e2eRuntime = require('../lib/e2eRuntime');
 
 function sessionTtlSeconds() {
   const value = Number(process.env.SESSION_TTL_SECONDS || 300);
@@ -25,6 +26,9 @@ function serializeSession(row) {
 }
 
 async function cleanupExpiredSessions(apiKeyId) {
+  if (e2eRuntime.isE2ETestMode()) {
+    return e2eRuntime.cleanupExpiredSessions(apiKeyId);
+  }
   if (!apiKeyId) return;
   await pool.query(
     `
@@ -37,6 +41,9 @@ async function cleanupExpiredSessions(apiKeyId) {
 }
 
 async function findActiveSession(apiKeyId) {
+  if (e2eRuntime.isE2ETestMode()) {
+    return e2eRuntime.findActiveSession(apiKeyId);
+  }
   const result = await pool.query(
     `
       SELECT *
@@ -52,6 +59,9 @@ async function findActiveSession(apiKeyId) {
 }
 
 async function createSession({ apiKeyId, clientId, ipAddress, userAgent }) {
+  if (e2eRuntime.isE2ETestMode()) {
+    return e2eRuntime.createSession({ apiKeyId, clientId, ipAddress, userAgent });
+  }
   const token = crypto.randomBytes(24).toString('hex');
   const result = await pool.query(
     `
@@ -86,6 +96,9 @@ async function createSession({ apiKeyId, clientId, ipAddress, userAgent }) {
 }
 
 async function touchSessionById(sessionId, { ipAddress, userAgent }) {
+  if (e2eRuntime.isE2ETestMode()) {
+    return e2eRuntime.touchSessionById(sessionId, { ipAddress, userAgent });
+  }
   const result = await pool.query(
     `
       UPDATE active_sessions
@@ -107,6 +120,9 @@ async function touchSessionById(sessionId, { ipAddress, userAgent }) {
 }
 
 async function touchSessionByToken({ apiKeyId, clientId, sessionToken, ipAddress, userAgent }) {
+  if (e2eRuntime.isE2ETestMode()) {
+    return e2eRuntime.touchSessionByToken({ apiKeyId, clientId, sessionToken, ipAddress, userAgent });
+  }
   const result = await pool.query(
     `
       UPDATE active_sessions
@@ -133,6 +149,9 @@ async function touchSessionByToken({ apiKeyId, clientId, sessionToken, ipAddress
 }
 
 async function deleteSession({ apiKeyId, clientId, sessionToken }) {
+  if (e2eRuntime.isE2ETestMode()) {
+    return e2eRuntime.deleteSession({ apiKeyId, clientId, sessionToken });
+  }
   const result = await pool.query(
     `
       DELETE FROM active_sessions
@@ -151,7 +170,7 @@ module.exports = {
   createSession,
   deleteSession,
   findActiveSession,
-  serializeSession,
+  serializeSession: e2eRuntime.isE2ETestMode() ? e2eRuntime.serializeSession : serializeSession,
   sessionTtlSeconds,
   touchSessionById,
   touchSessionByToken,
