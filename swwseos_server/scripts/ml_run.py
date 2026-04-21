@@ -5,6 +5,7 @@ import math
 import pickle
 import sys
 import time
+import warnings
 
 HAS_PANDAS = importlib.util.find_spec("pandas") is not None
 HAS_NUMPY = importlib.util.find_spec("numpy") is not None
@@ -25,6 +26,17 @@ if HAS_NUMPY:
     import numpy as np
 else:
     np = None
+if HAS_STATSMODELS:
+    import statsmodels.api as sm
+    try:
+        from statsmodels.tools.sm_exceptions import PerfectSeparationWarning
+    except Exception:
+        class PerfectSeparationWarning(Warning):
+            pass
+else:
+    sm = None
+    class PerfectSeparationWarning(Warning):
+        pass
 
 if HAS_SKLEARN:
     from sklearn.calibration import CalibratedClassifierCV
@@ -37,6 +49,7 @@ if HAS_SKLEARN:
     from sklearn.inspection import permutation_importance
     from sklearn.linear_model import ElasticNet, LinearRegression, LogisticRegression
     from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, mean_absolute_error, mean_squared_error, precision_score, r2_score, recall_score
+    from sklearn.metrics import silhouette_score
     from sklearn.model_selection import cross_val_score, train_test_split
     from sklearn.naive_bayes import GaussianNB
     from sklearn.neighbors import KNeighborsClassifier
@@ -72,6 +85,7 @@ def caps():
         "data": {
             "sklearn": HAS_SKLEARN,
             "pandas": HAS_PANDAS,
+            "numpy": HAS_NUMPY,
             "deepLearningMode": "optional" if HAS_SKLEARN else "disabled",
             "shap": HAS_SHAP,
             "statsmodels": HAS_STATSMODELS,
@@ -80,6 +94,12 @@ def caps():
             "xgboost": HAS_XGBOOST,
             "lightgbm": HAS_LIGHTGBM,
             "catboost": HAS_CATBOOST,
+            "fallbackModels": {
+                "regression": ["linear"] if HAS_PANDAS and HAS_NUMPY else [],
+                "classification": ["linear"] if HAS_PANDAS and HAS_NUMPY else [],
+                "clustering": ["kmeans", "dbscan"] if HAS_PANDAS and HAS_NUMPY else [],
+                "dim_reduction": ["pca"] if HAS_PANDAS and HAS_NUMPY else [],
+            },
         },
     }
 
@@ -173,6 +193,474 @@ def moving_avg_forecast(payload):
     return {"ok": True, "data": data}
 
 
+def split_holdout(X, y, test_size=0.2, random_state=42):
+    n = len(X)
+    if n < 3:
+        return None
+    rng = np.random.default_rng(int(random_state))
+    idx = np.arange(n)
+    rng.shuffle(idx)
+    test_n = max(1, min(n - 1, int(round(n * float(test_size)))))
+    test_idx = idx[:test_n]
+    train_idx = idx[test_n:]
+    if len(train_idx) < 2:
+        return None
+    return (
+        X.iloc[train_idx].reset_index(drop=True),
+        X.iloc[test_idx].reset_index(drop=True),
+        y.iloc[train_idx].reset_index(drop=True),
+        y.iloc[test_idx].reset_index(drop=True),
+    )
+
+
+def regression_scores(actual, predicted):
+    actual_arr = np.asarray(actual, dtype=float)
+    pred_arr = np.asarray(predicted, dtype=float)
+    resid = actual_arr - pred_arr
+    ss_res = float(np.sum(resid ** 2))
+    ss_tot = float(np.sum((actual_arr - np.mean(actual_arr)) ** 2))
+    r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+    mae = float(np.mean(np.abs(resid)))
+    rmse = float(np.sqrt(np.mean(resid ** 2)))
+    return {"r2": r2, "mae": mae, "rmse": rmse}, resid
+
+
+def confusion_counts(actual, predicted, labels):
+    label_index = {label: idx for idx, label in enumerate(labels)}
+    matrix = [[0 for _ in labels] for _ in labels]
+    for a, p in zip(actual, predicted):
+        matrix[label_index[a]][label_index[p]] += 1
+    return matrix
+
+
+def weighted_classification_scores(actual, predicted):
+    actual_labels = [str(v) for v in actual]
+    pred_labels = [str(v) for v in predicted]
+    labels = sorted(set(actual_labels) | set(pred_labels))
+    matrix = confusion_counts(actual_labels, pred_labels, labels)
+    total = max(1, len(actual_labels))
+    correct = sum(matrix[i][i] for i in range(len(labels)))
+    precision_weighted = 0.0
+    recall_weighted = 0.0
+    f1_weighted = 0.0
+    for idx, label in enumerate(labels):
+        tp = matrix[idx][idx]
+        support = sum(matrix[idx])
+        predicted_count = sum(row[idx] for row in matrix)
+        precision = tp / predicted_count if predicted_count else 0.0
+        recall = tp / support if support else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        weight = support / total
+        precision_weighted += precision * weight
+        recall_weighted += recall * weight
+        f1_weighted += f1 * weight
+    return {
+        "accuracy": correct / total,
+        "precision_weighted": precision_weighted,
+        "recall_weighted": recall_weighted,
+        "f1_weighted": f1_weighted,
+    }, labels, matrix
+
+
+def fallback_model_artifact(payload):
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return {
+        "format": "json-base64",
+        "byteSize": len(raw),
+        "payload": base64.b64encode(raw).decode("ascii"),
+    }
+
+
+def build_feature_matrix(df, feature_cols):
+    X = pd.get_dummies(df[feature_cols], dummy_na=False).fillna(0)
+    return X.astype(float)
+
+
+def pairwise_distance_matrix(arr):
+    diffs = arr[:, None, :] - arr[None, :, :]
+    return np.sqrt(np.sum(diffs ** 2, axis=2))
+
+
+def silhouette_score_from_labels(arr, labels, ignore_noise=False):
+    labels_arr = np.asarray(labels, dtype=int)
+    if ignore_noise:
+        mask = labels_arr != -1
+        arr = arr[mask]
+        labels_arr = labels_arr[mask]
+    unique = sorted(set(labels_arr.tolist()))
+    if len(unique) < 2 or len(arr) < 2:
+        return None
+    dist = pairwise_distance_matrix(arr)
+    scores = []
+    for idx in range(len(arr)):
+        same_mask = labels_arr == labels_arr[idx]
+        same_mask[idx] = False
+        if np.any(same_mask):
+            a = float(np.mean(dist[idx][same_mask]))
+        else:
+            a = 0.0
+        b_candidates = []
+        for label in unique:
+            if label == labels_arr[idx]:
+                continue
+            other_mask = labels_arr == label
+            if np.any(other_mask):
+                b_candidates.append(float(np.mean(dist[idx][other_mask])))
+        if not b_candidates:
+            continue
+        b = min(b_candidates)
+        denom = max(a, b)
+        scores.append((b - a) / denom if denom else 0.0)
+    return float(np.mean(scores)) if scores else None
+
+
+def kmeans_numpy(arr, n_clusters=3, random_state=42, max_iter=60):
+    if len(arr) < 2:
+        raise ValueError("not enough rows")
+    k = max(2, min(int(n_clusters), len(arr)))
+    rng = np.random.default_rng(int(random_state))
+    init_idx = rng.choice(len(arr), size=k, replace=False)
+    centroids = arr[init_idx].astype(float)
+    labels = np.zeros(len(arr), dtype=int)
+    for _ in range(max_iter):
+        distances = np.linalg.norm(arr[:, None, :] - centroids[None, :, :], axis=2)
+        next_labels = np.argmin(distances, axis=1)
+        next_centroids = centroids.copy()
+        for cluster_idx in range(k):
+            members = arr[next_labels == cluster_idx]
+            if len(members):
+                next_centroids[cluster_idx] = np.mean(members, axis=0)
+            else:
+                farthest_idx = int(np.argmax(np.min(distances, axis=1)))
+                next_centroids[cluster_idx] = arr[farthest_idx]
+        if np.array_equal(next_labels, labels) and np.allclose(next_centroids, centroids):
+            labels = next_labels
+            centroids = next_centroids
+            break
+        labels = next_labels
+        centroids = next_centroids
+    inertia = float(np.sum((arr - centroids[labels]) ** 2))
+    return labels, centroids, inertia
+
+
+def dbscan_numpy(arr, eps=0.5, min_samples=5):
+    if len(arr) < 2:
+        raise ValueError("not enough rows")
+    eps = float(eps)
+    min_samples = max(1, int(min_samples))
+    dist = pairwise_distance_matrix(arr)
+    labels = np.full(len(arr), -99, dtype=int)
+    visited = np.zeros(len(arr), dtype=bool)
+    cluster_id = 0
+
+    def neighbors(index):
+        return np.where(dist[index] <= eps)[0]
+
+    for index in range(len(arr)):
+        if visited[index]:
+            continue
+        visited[index] = True
+        seed_neighbors = neighbors(index)
+        if len(seed_neighbors) < min_samples:
+            labels[index] = -1
+            continue
+        labels[index] = cluster_id
+        seeds = list(seed_neighbors.tolist())
+        ptr = 0
+        while ptr < len(seeds):
+            point = seeds[ptr]
+            ptr += 1
+            if not visited[point]:
+                visited[point] = True
+                point_neighbors = neighbors(point)
+                if len(point_neighbors) >= min_samples:
+                    for candidate in point_neighbors.tolist():
+                        if candidate not in seeds:
+                            seeds.append(candidate)
+            if labels[point] in {-99, -1}:
+                labels[point] = cluster_id
+        cluster_id += 1
+
+    labels[labels == -99] = -1
+    return labels
+
+
+def pca_numpy(arr, n_components=2):
+    if len(arr) < 2:
+        raise ValueError("not enough rows")
+    component_count = max(1, min(int(n_components), min(arr.shape[0], arr.shape[1])))
+    centered = arr - np.mean(arr, axis=0, keepdims=True)
+    u, s, vt = np.linalg.svd(centered, full_matrices=False)
+    components = vt[:component_count]
+    projection = centered @ components.T
+    if len(arr) > 1:
+        explained = (s ** 2) / max(1, len(arr) - 1)
+    else:
+        explained = s ** 2
+    total = float(np.sum(explained))
+    ratios = (explained[:component_count] / total).tolist() if total else [0.0 for _ in range(component_count)]
+    return projection, ratios, components
+
+
+def fallback_train(payload):
+    rows = payload.get("rows") or []
+    task = str(payload.get("task") or "").strip().lower()
+    requested_model = str(payload.get("model") or "linear").strip().lower() or "linear"
+    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    opts = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+    if task not in {"regression", "classification", "clustering", "dim_reduction"}:
+        return err("ML_SKLEARN_REQUIRED", "sklearn is required for this model")
+    if not HAS_PANDAS or not HAS_NUMPY:
+        return err("ML_PANDAS_REQUIRED", "pandas and numpy are required")
+
+    df = pd.DataFrame(rows)
+    feature_cols = [c for c in (args.get("features") or []) if c in df.columns]
+
+    if task in {"clustering", "dim_reduction"}:
+        if not feature_cols:
+            feature_cols = list(df.columns[: min(5, len(df.columns))])
+        if not feature_cols:
+            return err("ML_FEATURES_REQUIRED", "features are required")
+        work = df[feature_cols].dropna()
+        if len(work) < 2:
+            return err("ML_TOO_FEW_ROWS", "not enough complete rows")
+        X = build_feature_matrix(work, feature_cols)
+        arr = X.to_numpy(dtype=float)
+        warning_messages = [f"sklearn is unavailable, so the backend used the numpy fallback runtime for '{requested_model}'."]
+        data = base_payload(task, requested_model, len(rows), str(opts.get("preset") or "balanced"), warning_messages)
+        data["encodedFeatureCount"] = int(X.shape[1])
+        data["diagnostics"] = {
+            "runtime": "fallback",
+            "requestedModel": requested_model,
+            "featureNames": X.columns.tolist()[:50],
+            "rowsUsed": int(len(work)),
+        }
+        data["validation"] = {
+            "holdoutTestSize": 0.0,
+            "scoring": "",
+            "cv": {"enabled": False, "reason": "unsupervised fallback runtime does not run cross-validation"},
+        }
+
+        if task == "clustering":
+            if requested_model == "kmeans":
+                labels, centroids, inertia = kmeans_numpy(
+                    arr,
+                    n_clusters=max(2, int(opts.get("nClusters") or 3)),
+                    random_state=int(opts.get("randomState") or 42),
+                )
+                silhouette = silhouette_score_from_labels(arr, labels.tolist())
+                data["metrics"] = {
+                    "cluster_count": int(len(sorted(set(labels.tolist())))),
+                    "inertia": inertia,
+                }
+                if silhouette is not None:
+                    data["metrics"]["silhouette"] = float(silhouette)
+                data["clusterSummary"] = [
+                    {"cluster": int(cluster_id), "count": int(count)}
+                    for cluster_id, count in zip(*np.unique(labels, return_counts=True))
+                ]
+                data["clusterSizes"] = list(data["clusterSummary"])
+                data["centroidPreview"] = [
+                    {str(X.columns[col_idx]): float(value) for col_idx, value in enumerate(center.tolist()[: min(6, len(X.columns))])}
+                    for center in centroids[: min(3, len(centroids))]
+                ]
+            else:
+                labels = dbscan_numpy(
+                    arr,
+                    eps=float(opts.get("eps") or 0.5),
+                    min_samples=max(1, int(opts.get("minSamples") or 5)),
+                )
+                cluster_ids = [cluster_id for cluster_id in sorted(set(labels.tolist())) if cluster_id != -1]
+                silhouette = silhouette_score_from_labels(arr, labels.tolist(), ignore_noise=True)
+                noise_count = int(np.sum(labels == -1))
+                data["metrics"] = {
+                    "cluster_count": int(len(cluster_ids)),
+                    "noise_ratio": float(noise_count / len(labels)),
+                }
+                if silhouette is not None:
+                    data["metrics"]["silhouette"] = float(silhouette)
+                data["clusterSummary"] = [
+                    {"cluster": int(cluster_id), "count": int(count)}
+                    for cluster_id, count in zip(*np.unique(labels, return_counts=True))
+                ]
+                data["clusterSizes"] = list(data["clusterSummary"])
+            data["metricsContract"] = metric_contract(task, data["metrics"])
+            return {"ok": True, "data": data}
+
+        projection, ratios, components = pca_numpy(arr, n_components=max(1, int(opts.get("nComponents") or 2)))
+        preview_cols = [f"PC{i+1}" for i in range(projection.shape[1])]
+        data["projectionPreview"] = [
+            {col: float(row[col_idx]) for col_idx, col in enumerate(preview_cols)}
+            for row in projection[:20]
+        ]
+        data["projectionMetadata"] = {
+            "componentCount": int(projection.shape[1]),
+            "inputFeatureCount": int(X.shape[1]),
+            "sourceRowCount": int(len(work)),
+            "featureNames": X.columns.tolist()[:50],
+        }
+        data["explainedVarianceRatio"] = [float(value) for value in ratios]
+        data["metrics"] = {
+            "explained_variance_total": float(sum(ratios)),
+            "component_count": int(projection.shape[1]),
+        }
+        data["componentPreview"] = [
+            {
+                "component": f"PC{idx + 1}",
+                "weights": {
+                    str(column): float(weight)
+                    for column, weight in zip(X.columns.tolist()[:20], components[idx][:20].tolist())
+                },
+            }
+            for idx in range(min(len(components), 3))
+        ]
+        data["metricsContract"] = metric_contract(task, data["metrics"])
+        return {"ok": True, "data": data}
+
+    target = str(args.get("target") or "").strip()
+    if target not in df.columns:
+        return err("ML_TARGET_REQUIRED", "target is required")
+    feature_cols = [c for c in feature_cols if c != target]
+    if not feature_cols:
+        feature_cols = [c for c in df.columns if c != target][: min(5, max(1, len(df.columns) - 1))]
+    if not feature_cols:
+        return err("ML_FEATURES_REQUIRED", "features are required")
+
+    work = df[[*feature_cols, target]].dropna()
+    if len(work) < 3:
+        return err("ML_TOO_FEW_ROWS", "not enough complete rows")
+
+    X = pd.get_dummies(work[feature_cols], dummy_na=False)
+    y = work[target]
+    split = split_holdout(X, y, float(opts.get("testSize") or 0.2), int(opts.get("randomState") or 42))
+    if split is None:
+        return err("ML_TOO_FEW_ROWS", "not enough rows after holdout split")
+    X_train, X_test, y_train, y_test = split
+
+    warning_messages = []
+    actual_model = "linear-fallback"
+    if requested_model != "linear":
+        warning_messages.append(f"sklearn is unavailable, so '{requested_model}' was downgraded to the linear fallback.")
+    else:
+        warning_messages.append("sklearn is unavailable, so the linear fallback runtime was used.")
+
+    data = base_payload(task, actual_model, len(rows), str(opts.get("preset") or "balanced"), warning_messages)
+    data["target"] = target
+    data["encodedFeatureCount"] = int(X.shape[1])
+    data["diagnostics"] = {
+        "trainRows": int(len(X_train)),
+        "testRows": int(len(X_test)),
+        "featureNames": X.columns.tolist()[:50],
+        "runtime": "fallback",
+        "requestedModel": requested_model,
+    }
+    data["validation"] = {
+        "holdoutTestSize": float(opts.get("testSize") or 0.2),
+        "scoring": str(opts.get("scoring") or ("accuracy" if task == "classification" else "r2")),
+        "cv": {"enabled": False, "reason": "fallback runtime does not run cross-validation"},
+    }
+
+    if task == "regression":
+        X_train_const = np.column_stack([np.ones(len(X_train)), X_train.to_numpy(dtype=float)])
+        X_test_const = np.column_stack([np.ones(len(X_test)), X_test.to_numpy(dtype=float)])
+        coef, *_ = np.linalg.lstsq(X_train_const, y_train.to_numpy(dtype=float), rcond=None)
+        pred = X_test_const @ coef
+        metrics, resid = regression_scores(y_test.to_numpy(dtype=float), pred)
+        data["metrics"] = metrics
+        data["errorAnalysis"] = {
+            "type": "regression",
+            "residualSummary": {
+                "mean": float(np.mean(resid)),
+                "absMean": float(np.mean(np.abs(resid))),
+                "q05": float(np.quantile(resid, 0.05)),
+                "q95": float(np.quantile(resid, 0.95)),
+            },
+            "topResiduals": [
+                {
+                    "actual": float(a),
+                    "predicted": float(b),
+                    "residual": float(a - b),
+                }
+                for a, b in list(zip(y_test.to_numpy(dtype=float).tolist(), pred.tolist()))[:10]
+            ],
+        }
+        feature_importance = [
+            {"feature": str(col), "importance": float(abs(val))}
+            for col, val in zip(X.columns.tolist(), coef[1:].tolist())
+        ]
+        data["importance"] = feature_importance
+        data["featureImportance"] = feature_importance
+        if opts.get("includeArtifact"):
+            data["modelArtifact"] = fallback_model_artifact(
+                {
+                    "runtime": "linear-fallback",
+                    "intercept": float(coef[0]),
+                    "coefficients": {
+                        str(col): float(val) for col, val in zip(X.columns.tolist(), coef[1:].tolist())
+                    },
+                }
+            )
+        data["metricsContract"] = metric_contract(task, data["metrics"])
+        return {"ok": True, "data": data}
+
+    classes = sorted({str(v) for v in y_train.tolist()} | {str(v) for v in y_test.tolist()})
+    if HAS_STATSMODELS and len(classes) == 2:
+        class_to_int = {classes[0]: 0, classes[1]: 1}
+        y_train_bin = y_train.map(lambda v: class_to_int[str(v)]).astype(float)
+        y_test_bin = y_test.map(lambda v: class_to_int[str(v)]).astype(float)
+        X_train_const = sm.add_constant(X_train.astype(float), has_constant="add")
+        X_test_const = sm.add_constant(X_test.astype(float), has_constant="add")
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=PerfectSeparationWarning)
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                fit = sm.Logit(y_train_bin, X_train_const).fit(disp=0, maxiter=200)
+            pred_prob = fit.predict(X_test_const)
+            pred_bin = (pred_prob >= 0.5).astype(int)
+            pred_labels = [classes[int(v)] for v in pred_bin.tolist()]
+            feature_importance = [
+                {"feature": str(col), "importance": float(abs(val))}
+                for col, val in fit.params.drop("const", errors="ignore").items()
+            ]
+            if opts.get("includeArtifact"):
+                data["modelArtifact"] = fallback_model_artifact(
+                    {
+                        "runtime": "logit-fallback",
+                        "params": {str(k): float(v) for k, v in fit.params.items()},
+                        "classes": classes,
+                    }
+                )
+            data["warnings"].append("Binary classification used a statsmodels logistic fallback because sklearn is unavailable.")
+            actual_model = "logit-fallback"
+        except Exception as exc:
+            pred_labels = [classes[0] for _ in range(len(y_test))]
+            feature_importance = []
+            data["warnings"].append(f"statsmodels logistic fallback failed ({exc}); majority-class fallback was used instead.")
+            actual_model = "majority-fallback"
+    else:
+        majority = y_train.astype(str).mode().iloc[0]
+        pred_labels = [str(majority) for _ in range(len(y_test))]
+        feature_importance = []
+        actual_model = "majority-fallback"
+        if len(classes) > 2:
+            data["warnings"].append("Multiclass fallback used majority-class predictions because sklearn is unavailable.")
+        else:
+            data["warnings"].append("Binary classification fallback used majority-class predictions because statsmodels is unavailable.")
+
+    metrics, labels, matrix = weighted_classification_scores(y_test.astype(str).tolist(), pred_labels)
+    data["model"] = actual_model
+    data["metrics"] = metrics
+    data["errorAnalysis"] = {
+        "type": "classification",
+        "labels": labels,
+        "matrix": matrix,
+    }
+    data["importance"] = feature_importance
+    data["featureImportance"] = feature_importance
+    data["metricsContract"] = metric_contract(task, data["metrics"])
+    return {"ok": True, "data": data}
+
+
 def if_dep_missing(model):
     if model == "xgboost" and not HAS_XGBOOST:
         return True
@@ -226,8 +714,21 @@ def sklearn_train(payload):
         labels = clf.fit_predict(X)
         uniq, counts = np.unique(labels, return_counts=True)
         data = base_payload(task, model, len(rows), preset)
-        data["metrics"] = {"cluster_count": int(len(set(labels)))}
+        metrics = {"cluster_count": int(len([cluster_id for cluster_id in uniq.tolist() if cluster_id != -1]))}
+        if model == "kmeans" and hasattr(clf, "inertia_"):
+            metrics["inertia"] = float(clf.inertia_)
+        try:
+            silhouette = silhouette_score(X, labels) if len(set(labels.tolist())) > 1 and len(X) > len(set(labels.tolist())) else None
+        except Exception:
+            silhouette = None
+        if silhouette is not None:
+            metrics["silhouette"] = float(silhouette)
+        if -1 in uniq.tolist():
+            metrics["noise_ratio"] = float((labels == -1).sum() / len(labels))
+        data["metrics"] = metrics
         data["clusterSummary"] = [{"cluster": int(k), "count": int(v)} for k, v in zip(uniq.tolist(), counts.tolist())]
+        data["clusterSizes"] = list(data["clusterSummary"])
+        data["diagnostics"] = {"runtime": "backend", "featureNames": X.columns.tolist()[:50], "rowsUsed": int(len(X))}
         data["metricsContract"] = metric_contract(task, data["metrics"])
         return {"ok": True, "data": data}
 
@@ -241,7 +742,17 @@ def sklearn_train(payload):
         data = base_payload(task, model, len(rows), preset)
         data["explainedVarianceRatio"] = [float(v) for v in clf.explained_variance_ratio_.tolist()]
         data["projectionPreview"] = preview
-        data["metrics"] = {"explained_variance_total": float(sum(data["explainedVarianceRatio"]))}
+        data["projectionMetadata"] = {
+            "componentCount": int(proj.shape[1]),
+            "inputFeatureCount": int(X.shape[1]),
+            "sourceRowCount": int(len(X)),
+            "featureNames": X.columns.tolist()[:50],
+        }
+        data["metrics"] = {
+            "explained_variance_total": float(sum(data["explainedVarianceRatio"])),
+            "component_count": int(proj.shape[1]),
+        }
+        data["diagnostics"] = {"runtime": "backend", "featureNames": X.columns.tolist()[:50], "rowsUsed": int(len(X))}
         data["metricsContract"] = metric_contract(task, data["metrics"])
         return {"ok": True, "data": data}
 
@@ -375,6 +886,9 @@ def main():
         out(moving_avg_forecast(payload))
         return
     if not HAS_SKLEARN:
+        if task in {"regression", "classification", "clustering", "dim_reduction"}:
+            out(fallback_train(payload))
+            return
         out(err("ML_SKLEARN_REQUIRED", "sklearn is required for this model"))
         return
     out(sklearn_train(payload))

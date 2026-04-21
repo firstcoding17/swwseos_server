@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 const { spawn } = require('child_process');
+const { runPythonJson } = require('../lib/runPythonJson');
 
 const router = express.Router();
 const uploadsDir = path.join(__dirname, '..', 'uploads');
@@ -130,6 +131,35 @@ router.post('/generate-graph', async (req, res) => {
       ok: false,
       error: 'graph generation failed',
       details: error.message,
+    });
+  }
+});
+
+router.get('/image-features/capabilities', async (_req, res) => {
+  try {
+    const data = await runPythonJson('scripts/image_feature_run.py', { op: 'capabilities' });
+    return res.json(data);
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      code: 'IMAGE_FEATURE_CAPABILITIES_ERROR',
+      message: error.message,
+    });
+  }
+});
+
+router.post('/image-features', async (req, res) => {
+  try {
+    const data = await runPythonJson('scripts/image_feature_run.py', {
+      ...(req.body || {}),
+      op: req.body?.op || 'extract',
+    });
+    return res.json(data);
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      code: 'IMAGE_FEATURE_RUN_ERROR',
+      message: error.message,
     });
   }
 });
