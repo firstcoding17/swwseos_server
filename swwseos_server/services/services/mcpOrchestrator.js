@@ -11,6 +11,155 @@ function cloneChatData(data, fallback = {}) {
   };
 }
 
+function historyText(history = []) {
+  return Array.isArray(history)
+    ? history
+      .slice(-4)
+      .map((entry) => String(entry?.text || entry?.content || '').trim())
+      .filter(Boolean)
+      .join('\n')
+    : '';
+}
+
+function includesAny(text = '', terms = []) {
+  const source = String(text || '').toLowerCase();
+  return terms.some((term) => source.includes(String(term || '').toLowerCase()));
+}
+
+function isSummaryPrompt(message = '') {
+  return includesAny(message, [
+    'summary',
+    'summarize',
+    'summarise',
+    'final report',
+    'report',
+    'wrap up',
+    'watchpoint',
+    'watchpoints',
+    'checklist',
+    '요약',
+    '최종',
+    '리포트',
+    '관찰 지표',
+    '체크리스트',
+  ]);
+}
+
+function looksLikeOilContext(message = '', datasetContext = {}, history = []) {
+  const columns = Array.isArray(datasetContext?.columns) ? datasetContext.columns.join(' ') : '';
+  const corpus = [
+    String(message || ''),
+    String(datasetContext?.datasetName || ''),
+    columns,
+    historyText(history),
+  ].join('\n');
+  return includesAny(corpus, [
+    'oil',
+    'crude',
+    'brent',
+    'wti',
+    'opec',
+    'hormuz',
+    'hormuz',
+    'iran',
+    'tanker',
+    'refining',
+    'korea',
+    '원유',
+    '이란',
+    '호르무즈',
+    '정유',
+    '한국 경제',
+  ]);
+}
+
+function pickColumns(datasetContext = {}, pattern) {
+  const columns = Array.isArray(datasetContext?.columns) ? datasetContext.columns : [];
+  return columns.filter((column) => pattern.test(String(column || ''))).slice(0, 4);
+}
+
+function buildOilSummaryData(datasetContext = {}, facts = {}, suggestions = []) {
+  const priceColumns = pickColumns(datasetContext, /brent|wti|price|oil/i);
+  const riskColumns = pickColumns(datasetContext, /risk|headline|news|supply|opec|iran|hormuz/i);
+  const checklist = [
+    priceColumns.length ? `${priceColumns.join(', ')} trend and daily change` : 'Brent and WTI price moves',
+    riskColumns.length ? `${riskColumns.join(', ')} signal scan` : 'Supply disruption and headline risk',
+    'Hormuz transit incidents, tanker insurance, and freight costs',
+    'OPEC+ response, Asian import demand, and refinery margin pressure',
+    'KRW/USD, Korea CPI, and energy-sensitive sector watchpoints',
+  ];
+  const trimmedSuggestions = suggestions
+    .filter((item) => includesAny(item?.label, ['profile', 'descriptive', 'correlation', 'time-series', 'flags']))
+    .slice(0, 5);
+
+  return {
+    reply: [
+      `Final report: ${facts.datasetName}.`,
+      `Price lens: ${priceColumns.length ? `track ${priceColumns.join(', ')}` : 'track the available oil price columns'} across the ${facts.rowCount}-row dataset and review date-based trend breaks first.`,
+      `Supply-risk lens: ${riskColumns.length ? `use ${riskColumns.join(', ')}` : 'use the news and risk fields'} to monitor disruption signals around Iran, Hormuz, and OPEC+ response.`,
+      'Korea watchpoints: imported energy costs, KRW/USD sensitivity, refining and petrochemical margins, shipping insurance, and freight-cost spillover.',
+      'Scenario frame: mild disruption -> short-lived spike; prolonged disruption -> inflation and transport-cost pressure; escalation -> supply shock and broader risk-off move.',
+      `Checklist: ${checklist.join(' | ')}.`,
+      `Current dataset fit: ${facts.columnCount} columns with ${facts.numericColumns} numeric, ${facts.categoricalColumns} categorical, and ${facts.dateColumns} date-like fields${facts.topCorrCount > 0 ? ` / ${facts.topCorrCount} correlation candidate(s) already flagged` : ''}.`,
+    ].join('\n'),
+    cards: [
+      {
+        type: 'report',
+        title: 'Final report',
+        body: 'Price, supply risk, scenario framing, and watchpoints are summarized for a stakeholder-ready oil brief.',
+      },
+      {
+        type: 'risk',
+        title: 'Supply risk',
+        body: riskColumns.length
+          ? `Focus columns: ${riskColumns.join(', ')}.`
+          : 'Focus on disruption headlines, transit signals, and producer-response evidence.',
+      },
+      {
+        type: 'korea',
+        title: 'Korea watchpoints',
+        body: 'Track imported energy costs, KRW/USD, refinery margins, petrochemical exposure, and shipping/freight pass-through.',
+      },
+    ],
+    suggestions: trimmedSuggestions.length ? trimmedSuggestions : suggestions.slice(0, 5),
+  };
+}
+
+function buildGenericSummaryData(facts = {}, suggestions = []) {
+  const trimmedSuggestions = suggestions
+    .filter((item) => includesAny(item?.label, ['profile', 'descriptive', 'correlation', 'flags', 'chart']))
+    .slice(0, 5);
+  return {
+    reply: [
+      `Final report: ${facts.datasetName}.`,
+      `Dataset scope: ${facts.rowCount} rows / ${facts.columnCount} columns / ${facts.numericColumns} numeric / ${facts.categoricalColumns} categorical / ${facts.dateColumns} date-like.`,
+      facts.warningCount > 0
+        ? `Risk notes: ${facts.warnings.slice(0, 2).join(' ')}`
+        : 'Risk notes: no major profile warnings were provided in the current context.',
+      facts.topCorrCount > 0
+        ? `Evidence summary: ${facts.topCorrCount} correlation candidate(s) are already flagged for follow-up.`
+        : 'Evidence summary: start with descriptive statistics, then confirm the strongest relationships visually.',
+      'Next checks: profile quality, descriptive stats, and one chart or one formal test before expanding the scope.',
+    ].join('\n'),
+    cards: [
+      {
+        type: 'report',
+        title: 'Final report',
+        body: 'A concise summary is ready for the current dataset context and follow-up analysis planning.',
+      },
+    ],
+    suggestions: trimmedSuggestions.length ? trimmedSuggestions : suggestions.slice(0, 5),
+  };
+}
+
+function buildSummaryData(message = '', datasetContext = {}, history = [], facts = {}, suggestions = []) {
+  if (!isSummaryPrompt(message)) return null;
+  if (looksLikeOilContext(message, datasetContext, history)) {
+    return buildOilSummaryData(datasetContext, facts, suggestions);
+  }
+  return buildGenericSummaryData(facts, suggestions);
+}
+
 function buildSuggestions(facts) {
   const suggestions = [];
   if (facts.workspaceCount > 1) {
@@ -283,10 +432,11 @@ function buildReply(message, facts, suggestions) {
   return lines.join('\n');
 }
 
-function buildRuleBasedChatData(message, datasetContext) {
+function buildRuleBasedChatData(message, datasetContext, history = []) {
   const facts = buildFacts(datasetContext);
   const suggestions = buildSuggestions(facts);
-  const reply = buildReply(message, facts, suggestions);
+  const summaryData = buildSummaryData(message, datasetContext, history, facts, suggestions);
+  const reply = summaryData?.reply || buildReply(message, facts, suggestions);
   const warnings = facts.warnings || [];
   const cards = [
     {
@@ -302,11 +452,14 @@ function buildRuleBasedChatData(message, datasetContext) {
       body: `${facts.workspaceCount} datasets open${facts.sharedColumns.length ? ` / shared columns: ${facts.sharedColumns.join(', ')}` : ''}`,
     });
   }
+  if (Array.isArray(summaryData?.cards)) {
+    cards.push(...summaryData.cards);
+  }
   return {
     mode: 'rule-based',
     reply,
     cards,
-    suggestions,
+    suggestions: Array.isArray(summaryData?.suggestions) ? summaryData.suggestions : suggestions,
     warnings,
   };
 }

@@ -43,7 +43,7 @@ async function runChatRequest(options = {}) {
 
   if (!isClaudeConfigured()) {
     return enrichRuleBasedChatDataWithStatsRecommendation({
-      data: buildRuleBasedChatData(trimmedMessage, datasetContext),
+      data: buildRuleBasedChatData(trimmedMessage, datasetContext, history),
       message: trimmedMessage,
       datasetContext,
       keyHeader,
@@ -51,7 +51,7 @@ async function runChatRequest(options = {}) {
     });
   }
 
-  const fallbackData = buildRuleBasedChatData(trimmedMessage, datasetContext);
+  const fallbackData = buildRuleBasedChatData(trimmedMessage, datasetContext, history);
 
   try {
     const claudeData = await runClaudeChat({
