@@ -75,6 +75,40 @@ function buildDatasetContext() {
   };
 }
 
+function buildOilDatasetContext() {
+  return {
+    datasetId: "ds-oil",
+    datasetName: "oil_market_news_joined_365",
+    rowCount: 365,
+    columnCount: 6,
+    columns: ["date", "brent", "wti", "headline_text", "risk_level", "korea_watchpoint"],
+    sampleRows: [
+      {
+        date: "2026-01-01",
+        brent: 81.2,
+        wti: 77.5,
+        headline_text: "Tanker insurance premiums rise after Gulf alert",
+        risk_level: "high",
+        korea_watchpoint: "refining margin pressure",
+      },
+      {
+        date: "2026-01-02",
+        brent: 82.0,
+        wti: 78.1,
+        headline_text: "OPEC+ signals possible supply response",
+        risk_level: "medium",
+        korea_watchpoint: "krw usd sensitivity",
+      },
+    ],
+    profileSummary: {
+      duplicates: 0,
+      warnings: [],
+      topCorrCount: 2,
+      topAnovaCount: 0,
+    },
+  };
+}
+
 async function run() {
   const app = express();
   app.use(express.json({ limit: "5mb" }));
@@ -161,6 +195,31 @@ async function run() {
     assert.equal(mlRes.body.data.result.ok, true);
     assert.equal(typeof mlRes.body.data.result.data?.sklearn, "boolean");
     pass("mcp manual flow can inspect ML capability results through the MCP bridge");
+
+    const oilDatasetContext = buildOilDatasetContext();
+    const oilPrompt = "Analyze the Iran oil issue with price, supply risk, and Korea impact angles.";
+    const oilChatRes = await requestJson(server, "POST", "/mcp/chat", {
+      message: oilPrompt,
+      datasetContext: oilDatasetContext,
+    });
+    assert.equal(oilChatRes.status, 200);
+    assert.equal(oilChatRes.body.ok, true);
+    const oilFollowUpRes = await requestJson(server, "POST", "/mcp/chat", {
+      message: "Summarize the current oil dashboard as a short final report with price, supply risk, and Korea watchpoints.",
+      datasetContext: oilDatasetContext,
+      history: [
+        { role: "user", text: oilPrompt },
+        { role: "assistant", text: oilChatRes.body.data.reply },
+      ],
+    });
+    assert.equal(oilFollowUpRes.status, 200);
+    assert.equal(oilFollowUpRes.body.ok, true);
+    assert.equal(oilFollowUpRes.body.data.mode, "rule-based");
+    assert.match(oilFollowUpRes.body.data.reply, /Final report/i);
+    assert.match(oilFollowUpRes.body.data.reply, /Korea watchpoints/i);
+    assert.ok(Array.isArray(oilFollowUpRes.body.data.cards));
+    assert.ok(oilFollowUpRes.body.data.cards.some((card) => card.title === "Final report"));
+    pass("mcp manual flow turns an oil follow-up summary prompt into a structured final report");
 
     if (!process.exitCode) {
       console.log("[OK] MCP manual-flow checks passed.");

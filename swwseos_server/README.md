@@ -58,3 +58,17 @@ psql -U <user> -d <db> -f sql/init_api_auth.sql
 npm install
 npm start
 ```
+
+## Optional Python runtimes
+
+Install the optional Python packages below on demo or staging hosts when you want direct ML/image runtimes instead of fallback-only behavior:
+
+```bash
+python -m pip install -r requirements-optional.txt
+```
+
+What this unlocks:
+
+- `scikit-learn`: direct ML estimators beyond the linear fallback path
+- `opencv-python`: direct image-feature extraction runtime
+- `pytesseract`: direct OCR runtime when the system `tesseract` binary is also installed
